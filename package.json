@@ -26,6 +26,15 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
+    "@speko/sdk": "workspace:*",
     "tslib": "^2.3.0"
+  },
+  "peerDependencies": {
+    "@livekit/agents": "^1.2.0",
+    "@livekit/rtc-node": "^0.13.0"
+  },
+  "devDependencies": {
+    "@livekit/agents": "^1.2.6",
+    "@livekit/rtc-node": "^0.13.25"
   }
 }
