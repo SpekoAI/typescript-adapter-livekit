@@ -18,5 +18,3 @@ runSpekoAgent({
   intent: { language: 'es-MX', vertical: 'healthcare' },
 });
 ```
-
-Track progress: <https://github.com/SpekoAI/platform>
