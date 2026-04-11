@@ -1,0 +1,7 @@
+{
+  "name": "@speko/adapter-livekit",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "packages/adapter-livekit/src",
+  "tags": ["scope:public", "type:adapter", "lang:ts"]
+}

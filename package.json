@@ -1,0 +1,40 @@
+{
+  "name": "@speko/adapter-livekit",
+  "version": "0.0.0",
+  "description": "LiveKit adapter for Speko — run STT/LLM/TTS routing inside a LiveKit agent worker",
+  "license": "MIT",
+  "author": "Speko",
+  "homepage": "https://speko.ai",
+  "keywords": ["speko", "livekit", "voice-ai", "adapter"],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "files": ["dist", "README.md", "LICENSE"],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "@spekoai/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@speko/sdk": "workspace:*",
+    "tslib": "^2.3.0"
+  },
+  "peerDependencies": {
+    "@livekit/agents": "^1.2.0",
+    "@livekit/rtc-node": "^0.13.0"
+  },
+  "devDependencies": {
+    "@livekit/agents": "^1.2.6",
+    "@livekit/rtc-node": "^0.13.25"
+  }
+}
