@@ -4,7 +4,14 @@
   "description": "LiveKit adapter for Speko — run STT/LLM/TTS routing inside a LiveKit agent worker",
   "license": "MIT",
   "author": "Speko",
-  "homepage": "https://speko.ai",
+  "homepage": "https://github.com/SpekoAI/typescript-adapter-livekit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SpekoAI/typescript-adapter-livekit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SpekoAI/typescript-adapter-livekit/issues"
+  },
   "keywords": ["speko", "livekit", "voice-ai", "adapter"],
   "type": "module",
   "main": "./dist/index.js",
