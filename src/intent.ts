@@ -1,8 +1,8 @@
-import type { OptimizeFor, RoutingIntent, Vertical } from '@speko/sdk';
+import type { OptimizeFor, RoutingIntent, Vertical } from '@spekoai/sdk';
 
 /**
  * Routing hint passed to every Speko proxy call the adapter makes. Mirrors
- * `@speko/sdk`'s `RoutingIntent` so that callers can pass a value they got
+ * `@spekoai/sdk`'s `RoutingIntent` so that callers can pass a value they got
  * from the SDK directly without a type detour.
  */
 export type Intent = RoutingIntent;

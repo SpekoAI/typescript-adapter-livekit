@@ -3,7 +3,7 @@ import {
   DEFAULT_API_CONNECT_OPTIONS,
   type APIConnectOptions,
 } from '@livekit/agents';
-import type { ChatMessage as SpekoChatMessage, Speko } from '@speko/sdk';
+import type { ChatMessage as SpekoChatMessage, Speko } from '@spekoai/sdk';
 
 import { type Intent, validateIntent } from './intent.js';
 

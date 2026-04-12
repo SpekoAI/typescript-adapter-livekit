@@ -1,4 +1,4 @@
-# @speko/adapter-livekit
+# @spekoai/adapter-livekit
 
 LiveKit Agents adapter for [Speko](https://speko.ai) — run your own LiveKit
 agent worker and have Speko's router pick the best STT, LLM, and TTS provider
@@ -7,7 +7,7 @@ per call. Failover is handled server-side; you don't ship provider API keys.
 ## Install
 
 ```sh
-npm install @speko/sdk @speko/adapter-livekit \
+npm install @spekoai/sdk @spekoai/adapter-livekit \
             @livekit/agents @livekit/agents-plugin-silero @livekit/rtc-node
 ```
 
@@ -26,8 +26,8 @@ import {
   voice,
 } from '@livekit/agents';
 import * as silero from '@livekit/agents-plugin-silero';
-import { Speko } from '@speko/sdk';
-import { createSpekoComponents } from '@speko/adapter-livekit';
+import { Speko } from '@spekoai/sdk';
+import { createSpekoComponents } from '@spekoai/adapter-livekit';
 import { fileURLToPath } from 'node:url';
 
 const speko = new Speko({ apiKey: process.env.SPEKO_API_KEY! });
@@ -82,7 +82,7 @@ Speko proxy plugs cleanly into a streaming `voice.AgentSession`.
 If you want more control, you can use the classes directly:
 
 ```ts
-import { SpekoSTT, SpekoLLM, SpekoTTS } from '@speko/adapter-livekit';
+import { SpekoSTT, SpekoLLM, SpekoTTS } from '@spekoai/adapter-livekit';
 import { stt, tts, tokenize } from '@livekit/agents';
 
 const spekoSTT = new SpekoSTT({ speko, intent });
@@ -121,9 +121,9 @@ const wrappedTTS = new tts.StreamAdapter(
 ```sh
 # from the monorepo root
 bun install
-npx nx run @speko/adapter-livekit:typecheck
-npx nx run @speko/adapter-livekit:build
-npx nx run @speko/adapter-livekit:test
+npx nx run @spekoai/adapter-livekit:typecheck
+npx nx run @spekoai/adapter-livekit:build
+npx nx run @spekoai/adapter-livekit:test
 ```
 
 ### Smoke test against a local proxy

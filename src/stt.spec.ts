@@ -5,7 +5,7 @@ import type {
   Speko,
   TranscribeOptions,
   TranscribeResult,
-} from '@speko/sdk';
+} from '@spekoai/sdk';
 
 import { SpekoSTT } from './stt.js';
 import { parseWav } from './audio.js';

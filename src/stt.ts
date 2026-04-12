@@ -1,12 +1,12 @@
 import { asLanguageCode, stt, type APIConnectOptions } from '@livekit/agents';
 import type { AudioBuffer } from '@livekit/agents';
-import type { Speko } from '@speko/sdk';
+import type { Speko } from '@spekoai/sdk';
 
 import { framesToWav } from './audio.js';
 import { type Intent, validateIntent } from './intent.js';
 
 export interface SpekoSTTOptions {
-  /** Initialised Speko client from `@speko/sdk`. */
+  /** Initialised Speko client from `@spekoai/sdk`. */
   speko: Speko;
   /** Routing hint sent with every transcription. */
   intent: Intent;

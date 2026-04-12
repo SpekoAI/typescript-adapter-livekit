@@ -1,6 +1,6 @@
 import { stt, tokenize, tts } from '@livekit/agents';
 import type { VAD } from '@livekit/agents';
-import type { Speko } from '@speko/sdk';
+import type { Speko } from '@spekoai/sdk';
 
 import { type Intent } from './intent.js';
 import { SpekoLLM, type SpekoLLMOptions } from './llm.js';
@@ -8,7 +8,7 @@ import { SpekoSTT } from './stt.js';
 import { SpekoTTS, type SpekoTTSOptions } from './tts.js';
 
 export interface CreateSpekoComponentsOptions {
-  /** Initialised Speko client from `@speko/sdk`. */
+  /** Initialised Speko client from `@spekoai/sdk`. */
   speko: Speko;
   /** Routing hint used for every proxy call. */
   intent: Intent;
@@ -50,8 +50,8 @@ export interface SpekoComponents {
  * ```ts
  * import { voice, defineAgent } from '@livekit/agents';
  * import * as silero from '@livekit/agents-plugin-silero';
- * import { Speko } from '@speko/sdk';
- * import { createSpekoComponents } from '@speko/adapter-livekit';
+ * import { Speko } from '@spekoai/sdk';
+ * import { createSpekoComponents } from '@spekoai/adapter-livekit';
  *
  * export default defineAgent({
  *   prewarm: async (proc) => {

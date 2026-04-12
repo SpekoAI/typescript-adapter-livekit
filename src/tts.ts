@@ -4,7 +4,7 @@ import {
   type APIConnectOptions,
 } from '@livekit/agents';
 import type { AudioFrame } from '@livekit/rtc-node';
-import type { Speko, SynthesizeResult } from '@speko/sdk';
+import type { Speko, SynthesizeResult } from '@spekoai/sdk';
 
 import { parseWav, pcmSampleRateFromContentType } from './audio.js';
 import { type Intent, validateIntent } from './intent.js';

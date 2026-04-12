@@ -5,7 +5,7 @@ export default defineConfig(() => ({
   root: import.meta.dirname,
   cacheDir: '../../node_modules/.vite/packages/adapter-livekit',
   test: {
-    name: '@speko/adapter-livekit',
+    name: '@spekoai/adapter-livekit',
     environment: 'node',
     include: ['src/**/*.{test,spec}.ts'],
     reporters: ['default'],

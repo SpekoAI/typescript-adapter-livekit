@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { SynthesizeResult } from '@speko/sdk';
+import type { SynthesizeResult } from '@spekoai/sdk';
 
 import { framesToWav } from './audio.js';
 import { decodeSynthesisResult } from './tts.js';
