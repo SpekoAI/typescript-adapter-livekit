@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { stt, tts } from '@livekit/agents';
-import type { Speko } from '@speko/sdk';
+import type { Speko } from '@spekoai/sdk';
 
 import { createSpekoComponents } from './components.js';
 import { SpekoLLM } from './llm.js';
