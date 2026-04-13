@@ -30,7 +30,12 @@ jobs:
       - name: Rewrite workspace:* SDK dep to concrete version
         run: |
           SDK_VERSION=$(npm view @spekoai/sdk version)
-          npm pkg set "dependencies.@spekoai/sdk=^${SDK_VERSION}"
+          if [ "$(npm pkg get dependencies.@spekoai/sdk)" != "{}" ]; then
+            npm pkg set "dependencies.@spekoai/sdk=^${SDK_VERSION}"
+          fi
+          if [ "$(npm pkg get peerDependencies.@spekoai/sdk)" != "{}" ]; then
+            npm pkg set "peerDependencies.@spekoai/sdk=^${SDK_VERSION}"
+          fi
 
       - run: npm install --no-save
 
