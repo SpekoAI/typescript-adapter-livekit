@@ -1,6 +1,6 @@
 {
   "name": "@spekoai/adapter-livekit",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "LiveKit adapter for Speko — run STT/LLM/TTS routing inside a LiveKit agent worker",
   "license": "MIT",
   "author": "Speko",
@@ -33,12 +33,12 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@spekoai/sdk": "workspace:*",
     "tslib": "^2.3.0"
   },
   "peerDependencies": {
     "@livekit/agents": "^1.2.0",
-    "@livekit/rtc-node": "^0.13.0"
+    "@livekit/rtc-node": "^0.13.0",
+    "@spekoai/sdk": "workspace:*"
   },
   "devDependencies": {
     "@livekit/agents": "^1.2.6",
