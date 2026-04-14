@@ -9,7 +9,7 @@ holds LiveKit credentials.
 
 1. **Speko API key.** Generate one in the dashboard (`/api-keys`).
 2. **Provider keys uploaded.** Deepgram, OpenAI, and Cartesia keys must be
-   set in the dashboard's `/providers` page — the router only picks
+   set in the dashboard's `/byok` page — the router only picks
    providers whose credentials are stored.
 3. **LiveKit project.** Get `LIVEKIT_URL` / `LIVEKIT_API_KEY` /
    `LIVEKIT_API_SECRET` from https://cloud.livekit.io (or your self-hosted
