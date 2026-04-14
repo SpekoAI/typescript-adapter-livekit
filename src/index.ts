@@ -1,5 +1,5 @@
 export { SpekoSTT, type SpekoSTTOptions } from './stt.js';
-export { SpekoLLM, type SpekoLLMOptions, chatContextToSpeko } from './llm.js';
+export { SpekoLLM, type SpekoLLMOptions, SpekoAdapterError, chatContextToSpeko } from './llm.js';
 export {
   SpekoTTS,
   SpekoTTSChunkedStream,
