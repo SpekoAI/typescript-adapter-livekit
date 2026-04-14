@@ -7,6 +7,16 @@ import type { ChatMessage as SpekoChatMessage, Speko } from '@spekoai/sdk';
 
 import { type Intent, validateIntent } from './intent.js';
 
+export class SpekoAdapterError extends Error {
+  readonly code: string;
+
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = 'SpekoAdapterError';
+    this.code = code;
+  }
+}
+
 export interface SpekoLLMOptions {
   speko: Speko;
   intent: Intent;
@@ -111,7 +121,13 @@ class SpekoLLMStream extends llm.LLMStream {
   }
 
   protected async run(): Promise<void> {
-    const { messages, systemPrompt } = chatContextToSpeko(this.chatCtx);
+    const messages = chatContextToSpeko(this.chatCtx);
+    if (messages.length === 0) {
+      throw new SpekoAdapterError(
+        'SpekoLLM: ChatContext produced no convertible messages',
+        'INVALID_CONTEXT',
+      );
+    }
 
     const result = await this.#speko.complete(
       {
@@ -123,7 +139,6 @@ class SpekoLLMStream extends llm.LLMStream {
             optimizeFor: this.#intent.optimizeFor,
           }),
         },
-        ...(systemPrompt !== undefined && { systemPrompt }),
         ...(this.#temperature !== undefined && { temperature: this.#temperature }),
         ...(this.#maxTokens !== undefined && { maxTokens: this.#maxTokens }),
       },
@@ -147,17 +162,11 @@ class SpekoLLMStream extends llm.LLMStream {
 }
 
 /**
- * Collapse a LiveKit `ChatContext` into Speko's `{ messages, systemPrompt }`
- * shape. All `system` / `developer` messages are concatenated with newlines
- * into `systemPrompt`; the remaining user / assistant messages become the
- * `messages` array in chronological order. Function-call and handoff items
- * are skipped — tools aren't supported by the proxy yet.
+ * Flatten a LiveKit `ChatContext` into Speko's `messages` array. System and
+ * developer items are emitted inline as `role: 'system'`; function-call and
+ * handoff items are skipped. Ordering is preserved.
  */
-export function chatContextToSpeko(ctx: llm.ChatContext): {
-  messages: SpekoChatMessage[];
-  systemPrompt?: string;
-} {
-  const systemParts: string[] = [];
+export function chatContextToSpeko(ctx: llm.ChatContext): SpekoChatMessage[] {
   const messages: SpekoChatMessage[] = [];
 
   for (const item of ctx.items) {
@@ -165,18 +174,18 @@ export function chatContextToSpeko(ctx: llm.ChatContext): {
     const text = extractText(item);
     if (!text) continue;
 
-    if (item.role === 'system' || item.role === 'developer') {
-      systemParts.push(text);
-      continue;
-    }
+    const role =
+      item.role === 'developer'
+        ? 'system'
+        : item.role === 'system' || item.role === 'user' || item.role === 'assistant'
+          ? item.role
+          : undefined;
+    if (role === undefined) continue;
 
-    if (item.role === 'user' || item.role === 'assistant') {
-      messages.push({ role: item.role, content: text });
-    }
+    messages.push({ role, content: text });
   }
 
-  const systemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined;
-  return systemPrompt !== undefined ? { messages, systemPrompt } : { messages };
+  return messages;
 }
 
 function extractText(message: llm.ChatMessage): string {

@@ -17,9 +17,8 @@ describe('chatContextToSpeko', () => {
       { role: 'user', content: 'how are you' },
     ]);
 
-    const { messages, systemPrompt } = chatContextToSpeko(ctx);
+    const messages = chatContextToSpeko(ctx);
 
-    expect(systemPrompt).toBeUndefined();
     expect(messages).toEqual([
       { role: 'user', content: 'hi' },
       { role: 'assistant', content: 'hello' },
@@ -27,37 +26,48 @@ describe('chatContextToSpeko', () => {
     ]);
   });
 
-  it('lifts system messages into systemPrompt and drops them from messages', () => {
+  it('emits system messages inline, preserving order', () => {
     const ctx = makeCtx([
       { role: 'system', content: 'You are a bot.' },
       { role: 'user', content: 'hi' },
     ]);
 
-    const { messages, systemPrompt } = chatContextToSpeko(ctx);
+    const messages = chatContextToSpeko(ctx);
 
-    expect(systemPrompt).toBe('You are a bot.');
-    expect(messages).toEqual([{ role: 'user', content: 'hi' }]);
+    expect(messages).toEqual([
+      { role: 'system', content: 'You are a bot.' },
+      { role: 'user', content: 'hi' },
+    ]);
   });
 
-  it('merges multiple system messages with double newlines', () => {
+  it('emits each system message as its own inline turn', () => {
     const ctx = makeCtx([
       { role: 'system', content: 'Rule 1.' },
       { role: 'system', content: 'Rule 2.' },
       { role: 'user', content: 'hi' },
     ]);
 
-    const { systemPrompt } = chatContextToSpeko(ctx);
-    expect(systemPrompt).toBe('Rule 1.\n\nRule 2.');
+    const messages = chatContextToSpeko(ctx);
+
+    expect(messages).toEqual([
+      { role: 'system', content: 'Rule 1.' },
+      { role: 'system', content: 'Rule 2.' },
+      { role: 'user', content: 'hi' },
+    ]);
   });
 
-  it('treats developer-role messages as system prompts', () => {
+  it("maps developer-role messages to role:'system' inline", () => {
     const ctx = makeCtx([
       { role: 'developer', content: 'Be terse.' },
       { role: 'user', content: 'hi' },
     ]);
 
-    const { systemPrompt } = chatContextToSpeko(ctx);
-    expect(systemPrompt).toBe('Be terse.');
+    const messages = chatContextToSpeko(ctx);
+
+    expect(messages).toEqual([
+      { role: 'system', content: 'Be terse.' },
+      { role: 'user', content: 'hi' },
+    ]);
   });
 
   it('skips messages whose textContent is empty', () => {
@@ -65,7 +75,28 @@ describe('chatContextToSpeko', () => {
     ctx.addMessage({ role: 'user', content: [] });
     ctx.addMessage({ role: 'user', content: 'real message' });
 
-    const { messages } = chatContextToSpeko(ctx);
+    const messages = chatContextToSpeko(ctx);
     expect(messages).toEqual([{ role: 'user', content: 'real message' }]);
+  });
+
+  it('emits a system-only greeting context as two inline system turns', () => {
+    const ctx = makeCtx([
+      { role: 'system', content: 'You are a helpful assistant.' },
+      { role: 'system', content: 'Greet the user warmly.' },
+    ]);
+
+    const messages = chatContextToSpeko(ctx);
+
+    expect(messages).toEqual([
+      { role: 'system', content: 'You are a helpful assistant.' },
+      { role: 'system', content: 'Greet the user warmly.' },
+    ]);
+  });
+
+  it('returns an empty array when every item is skippable', () => {
+    const ctx = llm.ChatContext.empty();
+    ctx.addMessage({ role: 'user', content: [] });
+
+    expect(chatContextToSpeko(ctx)).toEqual([]);
   });
 });
