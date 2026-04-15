@@ -1,6 +1,6 @@
 import { stt, tokenize, tts } from '@livekit/agents';
 import type { VAD } from '@livekit/agents';
-import type { Speko } from '@spekoai/sdk';
+import type { PipelineConstraints, Speko } from '@spekoai/sdk';
 
 import { type Intent } from './intent.js';
 import { SpekoLLM, type SpekoLLMOptions } from './llm.js';
@@ -19,6 +19,11 @@ export interface CreateSpekoComponentsOptions {
   vad: VAD;
   /** Optional voice override passed through to the TTS. */
   voice?: string;
+  /**
+   * Optional allow-list constraints shared by STT/LLM/TTS calls. The router
+   * still ranks by benchmark score but picks only from `allowedProviders[modality]`.
+   */
+  constraints?: PipelineConstraints;
   /**
    * Optional sentence tokenizer for TTS chunking. Defaults to the built-in
    * basic sentence tokenizer from `@livekit/agents`.
@@ -74,12 +79,17 @@ export interface SpekoComponents {
 export function createSpekoComponents(
   options: CreateSpekoComponentsOptions,
 ): SpekoComponents {
-  const sttOptions = { speko: options.speko, intent: options.intent };
+  const sttOptions = {
+    speko: options.speko,
+    intent: options.intent,
+    ...(options.constraints !== undefined && { constraints: options.constraints }),
+  };
   const llmOptions: SpekoLLMOptions = {
     speko: options.speko,
     intent: options.intent,
     ...(options.llm?.temperature !== undefined && { temperature: options.llm.temperature }),
     ...(options.llm?.maxTokens !== undefined && { maxTokens: options.llm.maxTokens }),
+    ...(options.constraints !== undefined && { constraints: options.constraints }),
   };
   const ttsOptions: SpekoTTSOptions = {
     speko: options.speko,
@@ -87,6 +97,7 @@ export function createSpekoComponents(
     ...(options.voice !== undefined && { voice: options.voice }),
     ...(options.ttsOptions?.speed !== undefined && { speed: options.ttsOptions.speed }),
     ...(options.ttsOptions?.sampleRate !== undefined && { sampleRate: options.ttsOptions.sampleRate }),
+    ...(options.constraints !== undefined && { constraints: options.constraints }),
   };
 
   const spekoSTT = new SpekoSTT(sttOptions);

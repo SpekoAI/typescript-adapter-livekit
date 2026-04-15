@@ -3,7 +3,11 @@ import {
   DEFAULT_API_CONNECT_OPTIONS,
   type APIConnectOptions,
 } from '@livekit/agents';
-import type { ChatMessage as SpekoChatMessage, Speko } from '@spekoai/sdk';
+import type {
+  ChatMessage as SpekoChatMessage,
+  PipelineConstraints,
+  Speko,
+} from '@spekoai/sdk';
 
 import { type Intent, validateIntent } from './intent.js';
 
@@ -24,6 +28,8 @@ export interface SpekoLLMOptions {
   temperature?: number;
   /** Forwarded to the proxy; defaults to the upstream model's default. */
   maxTokens?: number;
+  /** Optional allow-list constraints. */
+  constraints?: PipelineConstraints;
 }
 
 /**
@@ -41,6 +47,7 @@ export class SpekoLLM extends llm.LLM {
   readonly #intent: Intent;
   readonly #temperature?: number;
   readonly #maxTokens?: number;
+  readonly #constraints: PipelineConstraints | undefined;
   #warnedAboutTools = false;
 
   constructor(options: SpekoLLMOptions) {
@@ -50,6 +57,7 @@ export class SpekoLLM extends llm.LLM {
     this.#intent = options.intent;
     this.#temperature = options.temperature;
     this.#maxTokens = options.maxTokens;
+    this.#constraints = options.constraints;
   }
 
   override label(): string {
@@ -88,6 +96,7 @@ export class SpekoLLM extends llm.LLM {
       intent: this.#intent,
       temperature: this.#temperature,
       maxTokens: this.#maxTokens,
+      constraints: this.#constraints,
     });
   }
 }
@@ -100,6 +109,7 @@ interface SpekoLLMStreamArgs {
   intent: Intent;
   temperature?: number;
   maxTokens?: number;
+  constraints?: PipelineConstraints;
 }
 
 class SpekoLLMStream extends llm.LLMStream {
@@ -107,6 +117,7 @@ class SpekoLLMStream extends llm.LLMStream {
   readonly #intent: Intent;
   readonly #temperature?: number;
   readonly #maxTokens?: number;
+  readonly #constraints: PipelineConstraints | undefined;
 
   constructor(parent: SpekoLLM, args: SpekoLLMStreamArgs) {
     super(parent, {
@@ -118,6 +129,7 @@ class SpekoLLMStream extends llm.LLMStream {
     this.#intent = args.intent;
     this.#temperature = args.temperature;
     this.#maxTokens = args.maxTokens;
+    this.#constraints = args.constraints;
   }
 
   protected async run(): Promise<void> {
@@ -141,6 +153,7 @@ class SpekoLLMStream extends llm.LLMStream {
         },
         ...(this.#temperature !== undefined && { temperature: this.#temperature }),
         ...(this.#maxTokens !== undefined && { maxTokens: this.#maxTokens }),
+        ...(this.#constraints !== undefined && { constraints: this.#constraints }),
       },
       this.abortController.signal,
     );
