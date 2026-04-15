@@ -4,7 +4,7 @@ import {
   type APIConnectOptions,
 } from '@livekit/agents';
 import type { AudioFrame } from '@livekit/rtc-node';
-import type { Speko, SynthesizeResult } from '@spekoai/sdk';
+import type { PipelineConstraints, Speko, SynthesizeResult } from '@spekoai/sdk';
 
 import { parseWav, pcmSampleRateFromContentType } from './audio.js';
 import { type Intent, validateIntent } from './intent.js';
@@ -31,6 +31,8 @@ export interface SpekoTTSOptions {
    * Defaults to 24000 (Cartesia Sonic default).
    */
   sampleRate?: number;
+  /** Optional allow-list constraints. */
+  constraints?: PipelineConstraints;
 }
 
 /**
@@ -55,6 +57,7 @@ export class SpekoTTS extends tts.TTS {
   readonly #voice?: string;
   readonly #speed?: number;
   readonly #sampleRate: number;
+  readonly #constraints: PipelineConstraints | undefined;
 
   constructor(options: SpekoTTSOptions) {
     validateIntent(options.intent);
@@ -65,6 +68,7 @@ export class SpekoTTS extends tts.TTS {
     this.#voice = options.voice;
     this.#speed = options.speed;
     this.#sampleRate = sampleRate;
+    this.#constraints = options.constraints;
   }
 
   override get provider(): string {
@@ -88,6 +92,7 @@ export class SpekoTTS extends tts.TTS {
       voice: this.#voice,
       speed: this.#speed,
       expectedSampleRate: this.#sampleRate,
+      constraints: this.#constraints,
       connOptions,
       abortSignal,
     });
@@ -111,6 +116,7 @@ interface SpekoTTSChunkedStreamArgs {
   voice?: string;
   speed?: number;
   expectedSampleRate: number;
+  constraints?: PipelineConstraints;
   connOptions?: APIConnectOptions;
   abortSignal?: AbortSignal;
 }
@@ -122,6 +128,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
   readonly #voice?: string;
   readonly #speed?: number;
   readonly #expectedSampleRate: number;
+  readonly #constraints: PipelineConstraints | undefined;
 
   constructor(args: SpekoTTSChunkedStreamArgs) {
     super(args.text, args.tts, args.connOptions, args.abortSignal);
@@ -130,6 +137,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
     this.#voice = args.voice;
     this.#speed = args.speed;
     this.#expectedSampleRate = args.expectedSampleRate;
+    this.#constraints = args.constraints;
   }
 
   protected async run(): Promise<void> {
@@ -143,6 +151,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
         }),
         ...(this.#voice !== undefined && { voice: this.#voice }),
         ...(this.#speed !== undefined && { speed: this.#speed }),
+        ...(this.#constraints !== undefined && { constraints: this.#constraints }),
       },
       this.abortSignal,
     );

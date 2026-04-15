@@ -1,6 +1,6 @@
 import { asLanguageCode, stt, type APIConnectOptions } from '@livekit/agents';
 import type { AudioBuffer } from '@livekit/agents';
-import type { Speko } from '@spekoai/sdk';
+import type { PipelineConstraints, Speko } from '@spekoai/sdk';
 
 import { framesToWav } from './audio.js';
 import { type Intent, validateIntent } from './intent.js';
@@ -10,6 +10,8 @@ export interface SpekoSTTOptions {
   speko: Speko;
   /** Routing hint sent with every transcription. */
   intent: Intent;
+  /** Optional allow-list constraints. */
+  constraints?: PipelineConstraints;
 }
 
 /**
@@ -26,12 +28,14 @@ export class SpekoSTT extends stt.STT {
   label = 'speko.STT';
   readonly #speko: Speko;
   readonly #intent: Intent;
+  readonly #constraints: PipelineConstraints | undefined;
 
   constructor(options: SpekoSTTOptions) {
     super({ streaming: false, interimResults: false });
     validateIntent(options.intent);
     this.#speko = options.speko;
     this.#intent = options.intent;
+    this.#constraints = options.constraints;
   }
 
   override get provider(): string {
@@ -56,6 +60,7 @@ export class SpekoSTT extends stt.STT {
           optimizeFor: this.#intent.optimizeFor,
         }),
         contentType: 'audio/wav',
+        ...(this.#constraints !== undefined && { constraints: this.#constraints }),
       },
       abortSignal,
     );
