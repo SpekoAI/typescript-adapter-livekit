@@ -66,7 +66,7 @@ export interface SpekoComponents {
  *     const speko = new Speko({ apiKey: process.env.SPEKO_API_KEY! });
  *     const { stt, llm, tts } = createSpekoComponents({
  *       speko,
- *       intent: { language: 'en-US', vertical: 'general' },
+ *       intent: { language: 'en-US' },
  *       vad: ctx.proc.userData.vad,
  *     });
  *     const session = new voice.AgentSession({ vad: ctx.proc.userData.vad, stt, llm, tts });

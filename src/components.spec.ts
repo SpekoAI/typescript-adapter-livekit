@@ -27,7 +27,7 @@ describe('createSpekoComponents', () => {
   it('returns StreamAdapter-wrapped STT and TTS plus a raw LLM', () => {
     const components = createSpekoComponents({
       speko: makeFakeSpeko(),
-      intent: { language: 'en', vertical: 'general' },
+      intent: { language: 'en' },
       vad: makeFakeVAD(),
     });
 
@@ -42,7 +42,6 @@ describe('createSpekoComponents', () => {
       speko: makeFakeSpeko(),
       intent: {
         language: 'es-MX',
-        vertical: 'healthcare',
         optimizeFor: 'accuracy',
       },
       vad: makeFakeVAD(),
@@ -57,11 +56,10 @@ describe('createSpekoComponents', () => {
       createSpekoComponents({
         speko: makeFakeSpeko(),
         intent: {
-          language: 'en',
-          vertical: 'unknown' as unknown as 'general',
+          language: '' as unknown as string,
         },
         vad: makeFakeVAD(),
       }),
-    ).toThrow(/vertical/);
+    ).toThrow(/language/);
   });
 });

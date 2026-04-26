@@ -145,7 +145,6 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
       this.inputText,
       {
         language: this.#intent.language,
-        vertical: this.#intent.vertical,
         ...(this.#intent.optimizeFor !== undefined && {
           optimizeFor: this.#intent.optimizeFor,
         }),

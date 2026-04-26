@@ -1,4 +1,4 @@
-import type { OptimizeFor, RoutingIntent, Vertical } from '@spekoai/sdk';
+import type { OptimizeFor, RoutingIntent } from '@spekoai/sdk';
 
 /**
  * Routing hint passed to every Speko proxy call the adapter makes. Mirrors
@@ -7,14 +7,7 @@ import type { OptimizeFor, RoutingIntent, Vertical } from '@spekoai/sdk';
  */
 export type Intent = RoutingIntent;
 
-export type { OptimizeFor, Vertical };
-
-const VERTICALS: ReadonlySet<Vertical> = new Set([
-  'general',
-  'healthcare',
-  'finance',
-  'legal',
-]);
+export type { OptimizeFor };
 
 const OPTIMIZE_FOR: ReadonlySet<OptimizeFor> = new Set([
   'balanced',
@@ -30,12 +23,6 @@ const OPTIMIZE_FOR: ReadonlySet<OptimizeFor> = new Set([
 export function validateIntent(intent: Intent): void {
   if (!intent.language || typeof intent.language !== 'string') {
     throw new Error('SpekoAdapter: intent.language is required (BCP-47 tag)');
-  }
-  if (!VERTICALS.has(intent.vertical)) {
-    throw new Error(
-      `SpekoAdapter: unknown vertical "${intent.vertical}". ` +
-        `Expected one of: ${[...VERTICALS].join(', ')}.`,
-    );
   }
   if (intent.optimizeFor !== undefined && !OPTIMIZE_FOR.has(intent.optimizeFor)) {
     throw new Error(
