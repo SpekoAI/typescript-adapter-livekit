@@ -11,9 +11,9 @@ import { type Intent, validateIntent } from './intent.js';
 
 /**
  * Default output sample rate advertised to the LiveKit `AgentSession`. Speko's
- * Cartesia path returns 24 kHz raw PCM; the ElevenLabs path returns MP3 which
- * v1 does not decode — callers who need MP3 support should either configure
- * Speko to avoid ElevenLabs or wait for v2.
+ * router pins the upstream provider to 24 kHz mono PCM (Cartesia's native
+ * format, ElevenLabs via `output_format=pcm_24000`). Any provider that emits
+ * `audio/mpeg` is rejected — v1 ships no MP3 decoder.
  */
 const DEFAULT_SAMPLE_RATE = 24_000;
 const NUM_CHANNELS = 1;
@@ -46,9 +46,9 @@ export interface SpekoTTSOptions {
  * you.
  *
  * **Audio format constraint**: the adapter accepts either `audio/pcm;rate=NNNN`
- * (e.g. Cartesia) or `audio/wav`. `audio/mpeg` (ElevenLabs MP3) throws a clear
- * error in v1 — add an MP3 decoder or configure Speko to avoid ElevenLabs to
- * work around it.
+ * or `audio/wav`. The Speko router asks every supported TTS for PCM upstream
+ * (Cartesia natively, ElevenLabs via `output_format=pcm_24000`), so MP3 should
+ * never reach the adapter in v1; if it does, `decodeSynthesisResult` throws.
  */
 export class SpekoTTS extends tts.TTS {
   label = 'speko.TTS';
