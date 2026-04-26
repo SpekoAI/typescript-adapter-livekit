@@ -44,7 +44,6 @@ export default defineAgent({
       vad,
       intent: {
         language: 'en-US',
-        vertical: 'general',
         optimizeFor: 'balanced',
       },
     });

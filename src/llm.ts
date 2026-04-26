@@ -146,7 +146,6 @@ class SpekoLLMStream extends llm.LLMStream {
         messages,
         intent: {
           language: this.#intent.language,
-          vertical: this.#intent.vertical,
           ...(this.#intent.optimizeFor !== undefined && {
             optimizeFor: this.#intent.optimizeFor,
           }),

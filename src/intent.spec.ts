@@ -5,34 +5,24 @@ import { validateIntent } from './intent.js';
 describe('validateIntent', () => {
   it('accepts a valid intent', () => {
     expect(() =>
-      validateIntent({ language: 'es-MX', vertical: 'healthcare', optimizeFor: 'accuracy' }),
+      validateIntent({ language: 'es-MX', optimizeFor: 'accuracy' }),
     ).not.toThrow();
   });
 
   it('accepts an intent without optimizeFor', () => {
-    expect(() => validateIntent({ language: 'en', vertical: 'general' })).not.toThrow();
+    expect(() => validateIntent({ language: 'en' })).not.toThrow();
   });
 
   it('throws on missing language', () => {
     expect(() =>
-      validateIntent({ language: '' as unknown as string, vertical: 'general' }),
+      validateIntent({ language: '' as unknown as string }),
     ).toThrow(/language/);
-  });
-
-  it('throws on unknown vertical', () => {
-    expect(() =>
-      validateIntent({
-        language: 'en',
-        vertical: 'medical' as unknown as 'healthcare',
-      }),
-    ).toThrow(/vertical/);
   });
 
   it('throws on unknown optimizeFor', () => {
     expect(() =>
       validateIntent({
         language: 'en',
-        vertical: 'general',
         optimizeFor: 'speed' as unknown as 'latency',
       }),
     ).toThrow(/optimizeFor/);

@@ -17,7 +17,7 @@ export interface SpekoSTTOptions {
 /**
  * LiveKit Agents STT adapter that delegates recognition to the Speko proxy
  * (`POST /v1/transcribe`). The Speko router picks the best STT provider per
- * `(language, vertical, optimizeFor)` and handles failover.
+ * `(language, optimizeFor)` and handles failover.
  *
  * Declares `{ streaming: false }` — Speko's proxy is buffered turn-by-turn,
  * so this STT must be wrapped with `stt.StreamAdapter` + a VAD (e.g. Silero)
@@ -55,7 +55,6 @@ export class SpekoSTT extends stt.STT {
       wav,
       {
         language: this.#intent.language,
-        vertical: this.#intent.vertical,
         ...(this.#intent.optimizeFor !== undefined && {
           optimizeFor: this.#intent.optimizeFor,
         }),

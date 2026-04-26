@@ -52,7 +52,7 @@ export default defineAgent({
     const { stt, llm, tts } = createSpekoComponents({
       speko,
       vad,
-      intent: { language: 'en-US', vertical: 'general', optimizeFor: 'balanced' },
+      intent: { language: 'en-US', optimizeFor: 'balanced' },
     });
 
     const session = new voice.AgentSession({ vad, stt, llm, tts });
@@ -90,7 +90,7 @@ cli.runApp(new ServerOptions({
 | ------------------- | ----------------------------- | --------------------------------------------------------------------------- |
 | `speko`             | `Speko`                       | Initialized client from `@spekoai/sdk`.                                     |
 | `vad`               | `VAD`                         | Typically `await silero.VAD.load()`.                                        |
-| `intent`            | `Intent`                      | `{ language, vertical, optimizeFor? }`.                                     |
+| `intent`            | `Intent`                      | `{ language, optimizeFor? }`.                                               |
 | `voice?`            | `string`                      | TTS voice override.                                                         |
 | `constraints?`      | `PipelineConstraints`         | Per-modality provider allowlist (shared across STT/LLM/TTS).                |
 | `sentenceTokenizer?`| `tokenize.SentenceTokenizer`  | Defaults to `tokenize.basic.SentenceTokenizer`.                             |

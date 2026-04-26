@@ -51,7 +51,7 @@ describe('SpekoSTT', () => {
 
     const sttInstance = new SpekoSTT({
       speko,
-      intent: { language: 'en-US', vertical: 'general', optimizeFor: 'accuracy' },
+      intent: { language: 'en-US', optimizeFor: 'accuracy' },
     });
 
     const event = await sttInstance.recognize(makeFrame());
@@ -62,7 +62,6 @@ describe('SpekoSTT', () => {
     const [audioArg, optionsArg] = call;
     expect(optionsArg).toMatchObject({
       language: 'en-US',
-      vertical: 'general',
       optimizeFor: 'accuracy',
       contentType: 'audio/wav',
     });
@@ -89,7 +88,7 @@ describe('SpekoSTT', () => {
     });
     const sttInstance = new SpekoSTT({
       speko,
-      intent: { language: 'en', vertical: 'general' },
+      intent: { language: 'en' },
     });
     const event = await sttInstance.recognize(makeFrame());
     expect(event.alternatives?.[0]?.confidence).toBe(1);
@@ -106,7 +105,7 @@ describe('SpekoSTT', () => {
     });
     const sttInstance = new SpekoSTT({
       speko,
-      intent: { language: 'en', vertical: 'general' },
+      intent: { language: 'en' },
     });
     const controller = new AbortController();
     await sttInstance.recognize(makeFrame(), controller.signal);
@@ -126,7 +125,7 @@ describe('SpekoSTT', () => {
     });
     const sttInstance = new SpekoSTT({
       speko,
-      intent: { language: 'en', vertical: 'general' },
+      intent: { language: 'en' },
     });
     await sttInstance.recognize(makeFrame());
     const call = transcribe.mock.calls[0];
@@ -145,7 +144,7 @@ describe('SpekoSTT', () => {
     });
     const sttInstance = new SpekoSTT({
       speko,
-      intent: { language: 'en', vertical: 'general' },
+      intent: { language: 'en' },
     });
     expect(() => sttInstance.stream()).toThrow(/StreamAdapter/);
   });
@@ -164,10 +163,9 @@ describe('SpekoSTT', () => {
         new SpekoSTT({
           speko,
           intent: {
-            language: 'en',
-            vertical: 'bogus' as unknown as 'general',
+            language: '' as unknown as string,
           },
         }),
-    ).toThrow(/vertical/);
+    ).toThrow(/language/);
   });
 });
