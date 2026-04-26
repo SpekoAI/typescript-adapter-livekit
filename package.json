@@ -1,6 +1,6 @@
 {
   "name": "@spekoai/adapter-livekit",
-  "version": "0.0.8",
+  "version": "0.1.0",
   "description": "LiveKit adapter for Speko — run STT/LLM/TTS routing inside a LiveKit agent worker",
   "license": "MIT",
   "author": "Speko",
