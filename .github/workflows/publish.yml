@@ -1,0 +1,56 @@
+name: Publish to npm
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Node 24 ships with npm 11 which supports the trusted publisher
+      # OIDC exchange. Do NOT add setup-node's `registry-url` — it writes
+      # an .npmrc with an _authToken placeholder that prevents npm from
+      # falling through to OIDC. Let npm default to the public registry.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The mirror repo has no workspace context, so `workspace:*` on the SDK
+      # dep cannot be rewritten by pnpm/bun at publish time. Resolve the
+      # latest published SDK version and pin it explicitly before install.
+      - name: Rewrite workspace:* SDK dep to concrete version
+        run: |
+          SDK_VERSION=$(npm view @spekoai/sdk version)
+          if [ "$(npm pkg get dependencies.@spekoai/sdk)" != "{}" ]; then
+            npm pkg set "dependencies.@spekoai/sdk=^${SDK_VERSION}"
+          fi
+          if [ "$(npm pkg get peerDependencies.@spekoai/sdk)" != "{}" ]; then
+            npm pkg set "peerDependencies.@spekoai/sdk=^${SDK_VERSION}"
+          fi
+
+      - run: npm install --no-save
+
+      - name: Build for publish
+        run: npx tsc -p tsconfig.publish.json
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            --verify-tag
