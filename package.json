@@ -12,13 +12,22 @@
   "bugs": {
     "url": "https://github.com/SpekoAI/typescript-adapter-livekit/issues"
   },
-  "keywords": ["speko", "livekit", "voice-ai", "adapter"],
+  "keywords": [
+    "speko",
+    "livekit",
+    "voice-ai",
+    "adapter"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "sideEffects": false,
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     "./package.json": "./package.json",
     ".": {
