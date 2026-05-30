@@ -30,23 +30,21 @@ export interface SpekoLLMOptions {
   /** Optional allow-list constraints. */
   constraints?: PipelineConstraints;
   /**
-   * When set, the adapter loads tools registered for `agentId` from
-   * `GET ${apiBaseUrl}/v1/agents/${agentId}/tools` once per session and
-   * merges them with whatever LiveKit's `ToolContext` provides. Registered
-   * tools win on name collision. Omit `agentId` to keep the v0.3 behavior
-   * (LiveKit-runtime tools only).
+   * When set, the adapter loads tools registered for `agentId` via
+   * `speko.agents.tools.listChatTools(agentId)` once per session and merges
+   * them with whatever LiveKit's `ToolContext` provides. Registered tools win
+   * on name collision. Omit `agentId` to keep the v0.3 behavior (LiveKit-runtime
+   * tools only).
    */
   agentId?: string;
   /**
-   * Speko API base URL. Required when `agentId` is set so the loader knows
-   * which host to fetch from. Should match the `baseUrl` you passed to the
-   * `Speko` client. TODO: expose via `speko.baseUrl` getter so this can be
-   * inferred.
+   * @deprecated Ignored. The loader now reads the base URL from the `speko`
+   * client. Configure it on the `Speko` client instead.
    */
   apiBaseUrl?: string;
   /**
-   * Speko API key. Required when `agentId` is set. Should match the `apiKey`
-   * you passed to the `Speko` client. TODO: derive from `speko` client.
+   * @deprecated Ignored. The loader now reads the API key from the `speko`
+   * client. Configure it on the `Speko` client instead.
    */
   apiKey?: string;
   /**
@@ -82,15 +80,8 @@ export class SpekoLLM extends llm.LLM {
     this.#constraints = options.constraints;
 
     if (options.agentId) {
-      if (!options.apiBaseUrl || !options.apiKey) {
-        throw new SpekoAdapterError(
-          'SpekoLLM: `agentId` requires `apiBaseUrl` and `apiKey` to fetch registered tools.',
-          'INVALID_OPTIONS',
-        );
-      }
       this.#registeredLoader = new RegisteredToolsLoader({
-        baseUrl: options.apiBaseUrl,
-        apiKey: options.apiKey,
+        speko: options.speko,
         agentId: options.agentId,
         ...(options.onRegisteredToolsError && {
           onError: options.onRegisteredToolsError,

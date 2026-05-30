@@ -40,15 +40,21 @@ export interface CreateSpekoComponentsOptions {
    */
   sttOptions?: Pick<SpekoSTTOptions, 'keywords'>;
   /**
-   * Enable the registered-tools loader. When set, the LLM fetches tools
-   * registered in `agent_tool` for this `agentId` once per session and
-   * merges them with LiveKit's runtime ToolContext. Omit to keep
-   * runtime-only behavior.
+   * Enable the registered-tools loader. When set, the LLM loads the tools
+   * registered for this `agentId` via `speko.agents.tools.listChatTools(agentId)`
+   * once per session and merges them with LiveKit's runtime ToolContext. Omit
+   * to keep runtime-only behavior.
    */
   agentId?: string;
-  /** Speko API base URL — required when `agentId` is set. */
+  /**
+   * @deprecated Ignored. The loader now reads the base URL from the `speko`
+   * client.
+   */
   apiBaseUrl?: string;
-  /** Speko API key — required when `agentId` is set. */
+  /**
+   * @deprecated Ignored. The loader now reads the API key from the `speko`
+   * client.
+   */
   apiKey?: string;
   /** Called once if the registered-tools fetch fails (soft degradation). */
   onRegisteredToolsError?: (err: Error) => void;
@@ -111,8 +117,6 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
     ...(options.llm?.maxTokens !== undefined && { maxTokens: options.llm.maxTokens }),
     ...(options.constraints !== undefined && { constraints: options.constraints }),
     ...(options.agentId !== undefined && { agentId: options.agentId }),
-    ...(options.apiBaseUrl !== undefined && { apiBaseUrl: options.apiBaseUrl }),
-    ...(options.apiKey !== undefined && { apiKey: options.apiKey }),
     ...(options.onRegisteredToolsError !== undefined && {
       onRegisteredToolsError: options.onRegisteredToolsError,
     }),
