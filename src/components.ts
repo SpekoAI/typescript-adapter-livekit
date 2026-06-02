@@ -12,6 +12,8 @@ export interface CreateSpekoComponentsOptions {
   speko: Speko;
   /** Routing hint used for every proxy call. */
   intent: Intent;
+  /** Active Speko voice session id, forwarded to server-executed tools. */
+  sessionId?: string;
   /**
    * VAD instance used to segment user audio into utterances before calling
    * SpekoSTT uploads one VAD-bounded utterance to `/v1/transcribe`.
@@ -115,6 +117,7 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   const llmOptions: SpekoLLMOptions = {
     speko: options.speko,
     intent: options.intent,
+    ...(options.sessionId !== undefined && { sessionId: options.sessionId }),
     ...(options.llm?.temperature !== undefined && { temperature: options.llm.temperature }),
     ...(options.llm?.maxTokens !== undefined && { maxTokens: options.llm.maxTokens }),
     ...(options.constraints !== undefined && { constraints: options.constraints }),

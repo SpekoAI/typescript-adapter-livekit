@@ -23,6 +23,8 @@ export class SpekoAdapterError extends Error {
 export interface SpekoLLMOptions {
   speko: Speko;
   intent: Intent;
+  /** Active voice session id, forwarded to server-executed tools. */
+  sessionId?: string;
   /** Forwarded to the proxy; defaults to the upstream model's default. */
   temperature?: number;
   /** Forwarded to the proxy; defaults to the upstream model's default. */
@@ -67,6 +69,7 @@ export interface SpekoLLMOptions {
 export class SpekoLLM extends llm.LLM {
   readonly #speko: Speko;
   readonly #intent: Intent;
+  readonly #sessionId: string | undefined;
   readonly #temperature?: number;
   readonly #maxTokens?: number;
   readonly #constraints: PipelineConstraints | undefined;
@@ -78,6 +81,7 @@ export class SpekoLLM extends llm.LLM {
     validateIntent(options.intent);
     this.#speko = options.speko;
     this.#intent = options.intent;
+    this.#sessionId = options.sessionId;
     this.#temperature = options.temperature;
     this.#maxTokens = options.maxTokens;
     this.#constraints = options.constraints;
@@ -125,6 +129,7 @@ export class SpekoLLM extends llm.LLM {
       connOptions: params.connOptions ?? DEFAULT_API_CONNECT_OPTIONS,
       speko: this.#speko,
       intent: this.#intent,
+      sessionId: this.#sessionId,
       temperature: this.#temperature,
       maxTokens: this.#maxTokens,
       constraints: this.#constraints,
@@ -142,6 +147,7 @@ interface SpekoLLMStreamArgs {
   connOptions: APIConnectOptions;
   speko: Speko;
   intent: Intent;
+  sessionId?: string;
   temperature?: number;
   maxTokens?: number;
   constraints?: PipelineConstraints;
@@ -152,6 +158,7 @@ interface SpekoLLMStreamArgs {
 class SpekoLLMStream extends llm.LLMStream {
   readonly #speko: Speko;
   readonly #intent: Intent;
+  readonly #sessionId: string | undefined;
   readonly #temperature?: number;
   readonly #maxTokens?: number;
   readonly #constraints: PipelineConstraints | undefined;
@@ -168,6 +175,7 @@ class SpekoLLMStream extends llm.LLMStream {
     });
     this.#speko = args.speko;
     this.#intent = args.intent;
+    this.#sessionId = args.sessionId;
     this.#temperature = args.temperature;
     this.#maxTokens = args.maxTokens;
     this.#constraints = args.constraints;
@@ -231,6 +239,7 @@ class SpekoLLMStream extends llm.LLMStream {
           optimizeFor: this.#intent.optimizeFor,
         }),
       },
+      ...(this.#sessionId !== undefined && { sessionId: this.#sessionId }),
       ...(this.#temperature !== undefined && { temperature: this.#temperature }),
       ...(this.#maxTokens !== undefined && { maxTokens: this.#maxTokens }),
       ...(this.#constraints !== undefined && { constraints: this.#constraints }),
