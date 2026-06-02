@@ -29,6 +29,8 @@ export interface SpekoLLMOptions {
   maxTokens?: number;
   /** Optional allow-list constraints. */
   constraints?: PipelineConstraints;
+  /** Optional per-session tool declarations supplied by runtime call config. */
+  tools?: readonly ChatTool[];
   /**
    * When set, the adapter loads tools registered for `agentId` via
    * `speko.agents.tools.listChatTools(agentId)` once per session and merges
@@ -68,6 +70,7 @@ export class SpekoLLM extends llm.LLM {
   readonly #temperature?: number;
   readonly #maxTokens?: number;
   readonly #constraints: PipelineConstraints | undefined;
+  readonly #sessionTools: readonly ChatTool[] | undefined;
   readonly #registeredLoader: RegisteredToolsLoader | undefined;
 
   constructor(options: SpekoLLMOptions) {
@@ -78,6 +81,7 @@ export class SpekoLLM extends llm.LLM {
     this.#temperature = options.temperature;
     this.#maxTokens = options.maxTokens;
     this.#constraints = options.constraints;
+    this.#sessionTools = options.tools;
 
     if (options.agentId) {
       this.#registeredLoader = new RegisteredToolsLoader({
@@ -125,6 +129,7 @@ export class SpekoLLM extends llm.LLM {
       maxTokens: this.#maxTokens,
       constraints: this.#constraints,
       registeredLoader: this.#registeredLoader,
+      sessionTools: this.#sessionTools,
     });
   }
 }
@@ -141,6 +146,7 @@ interface SpekoLLMStreamArgs {
   maxTokens?: number;
   constraints?: PipelineConstraints;
   registeredLoader?: RegisteredToolsLoader;
+  sessionTools?: readonly ChatTool[];
 }
 
 class SpekoLLMStream extends llm.LLMStream {
@@ -149,6 +155,7 @@ class SpekoLLMStream extends llm.LLMStream {
   readonly #temperature?: number;
   readonly #maxTokens?: number;
   readonly #constraints: PipelineConstraints | undefined;
+  readonly #sessionTools: readonly ChatTool[] | undefined;
   readonly #toolChoice: llm.ToolChoice | undefined;
   readonly #parallelToolCalls: boolean | undefined;
   readonly #registeredLoader: RegisteredToolsLoader | undefined;
@@ -164,6 +171,7 @@ class SpekoLLMStream extends llm.LLMStream {
     this.#temperature = args.temperature;
     this.#maxTokens = args.maxTokens;
     this.#constraints = args.constraints;
+    this.#sessionTools = args.sessionTools;
     this.#toolChoice = args.toolChoice;
     this.#parallelToolCalls = args.parallelToolCalls;
     this.#registeredLoader = args.registeredLoader;
@@ -195,7 +203,8 @@ class SpekoLLMStream extends llm.LLMStream {
     const registeredTools = this.#registeredLoader
       ? await this.#registeredLoader.load()
       : undefined;
-    const tools = mergeTools(registeredTools, runtimeTools);
+    const configuredTools = mergeTools(this.#sessionTools, registeredTools);
+    const tools = mergeTools(configuredTools, runtimeTools);
 
     logger.info(
       {
@@ -207,6 +216,7 @@ class SpekoLLMStream extends llm.LLMStream {
         constraints: this.#constraints,
         toolCount: tools?.length ?? 0,
         registeredToolCount: registeredTools?.length ?? 0,
+        sessionToolCount: this.#sessionTools?.length ?? 0,
         runtimeToolCount: runtimeTools?.length ?? 0,
       },
       '[SpekoLLM] complete:start',

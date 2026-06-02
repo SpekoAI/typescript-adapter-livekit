@@ -1,6 +1,6 @@
 import type { VAD } from '@livekit/agents';
 import { stt, tokenize, tts } from '@livekit/agents';
-import type { PipelineConstraints, Speko } from '@spekoai/sdk';
+import type { ChatTool, PipelineConstraints, Speko } from '@spekoai/sdk';
 
 import type { Intent } from './intent.js';
 import { SpekoLLM, type SpekoLLMOptions } from './llm.js';
@@ -32,6 +32,8 @@ export interface CreateSpekoComponentsOptions {
   sentenceTokenizer?: tokenize.SentenceTokenizer;
   /** Optional LLM tuning forwarded to `/v1/complete`. */
   llm?: Pick<SpekoLLMOptions, 'temperature' | 'maxTokens'>;
+  /** Optional per-session tools supplied by a pre-call config webhook. */
+  tools?: ChatTool[];
   /** Optional TTS tuning (output sample rate, speed) forwarded to the TTS. */
   ttsOptions?: Pick<SpekoTTSOptions, 'sampleRate' | 'speed'>;
   /**
@@ -116,6 +118,7 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
     ...(options.llm?.temperature !== undefined && { temperature: options.llm.temperature }),
     ...(options.llm?.maxTokens !== undefined && { maxTokens: options.llm.maxTokens }),
     ...(options.constraints !== undefined && { constraints: options.constraints }),
+    ...(options.tools !== undefined && { tools: options.tools }),
     ...(options.agentId !== undefined && { agentId: options.agentId }),
     ...(options.onRegisteredToolsError !== undefined && {
       onRegisteredToolsError: options.onRegisteredToolsError,
