@@ -1,0 +1,75 @@
+{
+  "name": "@spekoai/adapter-livekit",
+  "version": "0.1.2",
+  "description": "LiveKit adapter for Speko — run STT/LLM/TTS routing inside a LiveKit agent worker",
+  "license": "MIT",
+  "author": "Speko",
+  "homepage": "https://github.com/SpekoAI/typescript-adapter-livekit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SpekoAI/typescript-adapter-livekit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SpekoAI/typescript-adapter-livekit/issues"
+  },
+  "keywords": [
+    "speko",
+    "spekoai",
+    "livekit",
+    "livekit-agents",
+    "livekit-plugin",
+    "adapter",
+    "voice-ai",
+    "voice-agent",
+    "stt",
+    "tts",
+    "speech-to-text",
+    "text-to-speech",
+    "failover",
+    "fallback",
+    "fallback-adapter",
+    "voice-routing",
+    "llm-routing",
+    "multilingual",
+    "elevenlabs",
+    "deepgram",
+    "cartesia"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "@spekoai/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "peerDependencies": {
+    "@livekit/agents": "^1.2.0",
+    "@livekit/rtc-node": "^0.13.0",
+    "@spekoai/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@livekit/agents": "^1.4.3",
+    "@livekit/rtc-node": "^0.13.25",
+    "@types/node": "^25",
+    "typescript": "~6.0.3"
+  }
+}
