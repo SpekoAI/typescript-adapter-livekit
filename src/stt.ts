@@ -1,5 +1,6 @@
 import type { AudioBuffer } from '@livekit/agents';
-import { type APIConnectOptions, asLanguageCode, stt } from '@livekit/agents';
+import { type APIConnectOptions, asLanguageCode, type LanguageCode, stt } from '@livekit/agents';
+import type { AudioFrame } from '@livekit/rtc-node';
 import type { PipelineConstraints, Speko } from '@spekoai/sdk';
 
 import { framesToWav } from './audio.js';
@@ -17,18 +18,50 @@ export interface SpekoSTTOptions {
    * vocabulary biasing. Casing is preserved for proper nouns.
    */
   keywords?: readonly string[];
+  /**
+   * Enable native microphone streaming via the Speko proxy's
+   * `GET /v1/transcribe/stream` WebSocket endpoint. When `true`, this STT
+   * declares `{ streaming: true }` and `stream()` opens a long-lived WS that
+   * streams raw PCM and emits interim + final transcripts as the provider
+   * produces them — no VAD-bounded buffering. When `false` (default for direct
+   * construction), the adapter uploads one VAD-bounded WAV per turn via
+   * `_recognize()` and must be wrapped with `stt.StreamAdapter`.
+   *
+   * `streaming` requires {@link baseUrl} and {@link apiKey} so the stream can
+   * open its own WebSocket — the `Speko` SDK client does not expose them.
+   */
+  streaming?: boolean;
+  /**
+   * Speko proxy base URL (e.g. `https://api.speko.dev`). Required when
+   * {@link streaming} is `true`. Threaded explicitly because the SDK client
+   * keeps its base URL private. Ignored in batch mode.
+   */
+  baseUrl?: string;
+  /**
+   * Speko API key (Bearer). Required when {@link streaming} is `true`.
+   * Threaded explicitly because the SDK client keeps its key private. Ignored
+   * in batch mode.
+   */
+  apiKey?: string;
 }
 
 /**
- * LiveKit Agents STT adapter that delegates recognition to the Speko proxy
- * (`POST /v1/transcribe`). The Speko router picks the best STT provider per
- * `(language, region, optimizeFor)` and handles failover.
+ * LiveKit Agents STT adapter that delegates recognition to the Speko proxy.
  *
- * Declares `{ streaming: false }` because this adapter uploads one
- * VAD-bounded WAV per recognition call. The underlying `/v1/transcribe`
- * response streams transcript events, and the SDK aggregates the final result
- * for `_recognize()`. Wrap with `stt.StreamAdapter` + a VAD (e.g. Silero) to
- * plug into a `voice.AgentSession`; `createSpekoComponents()` does that for you.
+ * Two modes:
+ *
+ *   - Batch (default): uploads one VAD-bounded WAV per recognition call to
+ *     `POST /v1/transcribe`. Declares `{ streaming: false }`; wrap with
+ *     `stt.StreamAdapter` + a VAD to plug into a `voice.AgentSession`.
+ *
+ *   - Streaming (`{ streaming: true }`): opens a long-lived WebSocket to
+ *     `GET /v1/transcribe/stream`, sends a WAV header then raw PCM, and emits
+ *     interim + final transcripts as the provider produces them. Declares
+ *     `{ streaming: true, interimResults: true }` and can be dropped straight
+ *     into a `voice.AgentSession` (no `StreamAdapter` wrapper).
+ *
+ * The router picks the best STT provider per `(language, region, optimizeFor)`
+ * and handles failover.
  */
 export class SpekoSTT extends stt.STT {
   label = 'speko.STT';
@@ -36,14 +69,35 @@ export class SpekoSTT extends stt.STT {
   readonly #intent: Intent;
   readonly #constraints: PipelineConstraints | undefined;
   readonly #keywords: readonly string[] | undefined;
+  readonly #streaming: boolean;
+  readonly #baseUrl: string | undefined;
+  readonly #apiKey: string | undefined;
 
   constructor(options: SpekoSTTOptions) {
-    super({ streaming: false, interimResults: false });
+    const streaming = options.streaming ?? false;
+    super({ streaming, interimResults: streaming });
     validateIntent(options.intent);
+    if (streaming) {
+      if (!options.baseUrl) {
+        throw new Error(
+          'SpekoSTT: streaming mode requires `baseUrl` (the SDK client does not expose it). ' +
+            'Pass the same base URL you used to construct the Speko client.',
+        );
+      }
+      if (!options.apiKey) {
+        throw new Error(
+          'SpekoSTT: streaming mode requires `apiKey` (the SDK client does not expose it). ' +
+            'Pass the same API key you used to construct the Speko client.',
+        );
+      }
+    }
     this.#speko = options.speko;
     this.#intent = options.intent;
     this.#constraints = options.constraints;
     this.#keywords = options.keywords && options.keywords.length > 0 ? options.keywords : undefined;
+    this.#streaming = streaming;
+    this.#baseUrl = options.baseUrl;
+    this.#apiKey = options.apiKey;
   }
 
   override get provider(): string {
@@ -88,12 +142,358 @@ export class SpekoSTT extends stt.STT {
     };
   }
 
-  override stream(_options?: { connOptions?: APIConnectOptions }): stt.SpeechStream {
-    throw new Error(
-      'SpekoSTT does not support native microphone streaming; it uploads one VAD-bounded utterance. ' +
-        'Wrap this instance with `new stt.StreamAdapter(spekoStt, vad)` from ' +
-        '@livekit/agents, or pass it through `createSpekoComponents()` which ' +
-        'returns a ready-to-use StreamAdapter-wrapped STT.',
-    );
+  override stream(options?: { connOptions?: APIConnectOptions }): stt.SpeechStream {
+    if (!this.#streaming) {
+      throw new Error(
+        'SpekoSTT (batch mode) does not support native microphone streaming; it uploads one ' +
+          'VAD-bounded utterance. Either construct with `{ streaming: true, baseUrl, apiKey }`, ' +
+          'wrap this instance with `new stt.StreamAdapter(spekoStt, vad)` from @livekit/agents, ' +
+          'or pass it through `createSpekoComponents()`.',
+      );
+    }
+    if (!this.#baseUrl || !this.#apiKey) {
+      // Unreachable: the constructor rejects streaming without both. Kept as a
+      // type guard so the options object below needs no non-null assertions.
+      throw new Error('SpekoSTT: streaming requires baseUrl and apiKey');
+    }
+    return new SpekoSpeechStream(this, {
+      baseUrl: this.#baseUrl,
+      apiKey: this.#apiKey,
+      intent: this.#intent,
+      constraints: this.#constraints,
+      keywords: this.#keywords,
+      ...(options?.connOptions ? { connOptions: options.connOptions } : {}),
+    });
+  }
+}
+
+// --- streaming WebSocket SpeechStream --------------------------------------
+
+interface SpekoSpeechStreamOptions {
+  readonly baseUrl: string;
+  readonly apiKey: string;
+  readonly intent: Intent;
+  readonly constraints: PipelineConstraints | undefined;
+  readonly keywords: readonly string[] | undefined;
+  readonly connOptions?: APIConnectOptions;
+}
+
+/** Server→client frame from `GET /v1/transcribe/stream`. */
+interface ServerTranscriptFrame {
+  type: 'transcript';
+  text: string;
+  isFinal: boolean;
+  confidence: number;
+}
+
+const WAV_HEADER_BYTES = 44;
+const WAV_PCM_FORMAT = 1;
+const WAV_BITS_PER_SAMPLE = 16;
+// Streaming PCM is open-ended: we don't know the total length up front, so the
+// RIFF/data chunk sizes are written as the canonical "streaming/unknown"
+// sentinel. The server only reads `byteRate` (offset 28) for billing and never
+// trusts these size fields, so 0xFFFFFFFF is safe and self-documenting.
+const WAV_STREAMING_SIZE = 0xffffffff;
+// WHATWG WebSocket.readyState OPEN.
+const WS_OPEN = 1;
+// Cap reconnects so a permanently-down proxy doesn't spin forever. Each loss of
+// the socket mid-session burns one attempt; a clean end just returns from run().
+const MAX_RECONNECTS = 3;
+
+/**
+ * Long-lived streaming STT over the Speko proxy WebSocket. LiveKit calls
+ * `stream()` once per session and keeps the returned `SpeechStream` for the
+ * whole call, pushing every captured `AudioFrame` into `this.input`. So this
+ * connection is session-scoped, not per-turn: we hold one WS open and let the
+ * upstream provider segment utterances and emit interim/final transcripts.
+ *
+ * Resilience contract (per spec): a WS failure must NOT crash the session. On
+ * any socket error or unexpected close we log loudly, attempt a bounded
+ * reconnect, and if reconnects are exhausted we return cleanly from `run()` —
+ * which closes the output queue (an implicit "end"), so the AgentSession keeps
+ * running (silently deaf) rather than throwing.
+ */
+class SpekoSpeechStream extends stt.SpeechStream {
+  label = 'speko.SpeechStream';
+  readonly #opts: SpekoSpeechStreamOptions;
+  readonly #language: LanguageCode;
+  #speaking = false;
+
+  constructor(sttImpl: SpekoSTT, opts: SpekoSpeechStreamOptions) {
+    super(sttImpl);
+    this.#opts = opts;
+    this.#language = asLanguageCode(opts.intent.language);
+  }
+
+  protected async run(): Promise<void> {
+    // The framework feeds frames into `this.input`. We must drain it exactly
+    // once across the whole session (it can't be re-iterated), so the input
+    // iterator lives outside the reconnect loop: a reconnect resumes consuming
+    // from wherever the previous socket left off.
+    const inputIterator = this.input[Symbol.asyncIterator]();
+    let inputDone = false;
+    let reconnects = 0;
+
+    while (!this.closed && !inputDone) {
+      try {
+        inputDone = await this.#runOneConnection(inputIterator);
+      } catch (err) {
+        // Loud, never fatal. Surface as an STT error event for observability,
+        // then decide whether to reconnect.
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.#emitError(error);
+        if (this.closed || inputDone) break;
+        reconnects += 1;
+        if (reconnects > MAX_RECONNECTS) {
+          this.#log(
+            `giving up after ${MAX_RECONNECTS} reconnect attempts; ending stream (session continues)`,
+          );
+          break;
+        }
+        this.#log(`reconnecting (attempt ${reconnects}/${MAX_RECONNECTS}) after: ${error.message}`);
+      }
+    }
+    // Returning here causes the base class to close the output queue, which the
+    // AgentSession reads as end-of-stream. We never re-throw — a dead WS must
+    // not take down the call.
+  }
+
+  /**
+   * Open one WebSocket, send config + audio, and forward transcripts until the
+   * input is exhausted or the socket closes. Resolves `true` when the input
+   * iterator finished (clean end, no reconnect). Rejects on a reconnectable
+   * socket failure with input still pending.
+   */
+  #runOneConnection(
+    inputIterator: AsyncIterator<AudioFrame | typeof stt.SpeechStream.FLUSH_SENTINEL>,
+  ): Promise<boolean> {
+    const url = toWsUrl(this.#opts.baseUrl);
+    // Node 22+ ships a global WHATWG `WebSocket`; the worker runs on Node 24.
+    // Using it avoids adding a `ws` dependency to this published package. The
+    // options arg (headers) is a Node extension to the WHATWG ctor signature.
+    const ws = new WebSocket(url, {
+      headers: { Authorization: `Bearer ${this.#opts.apiKey}` },
+    } as unknown as string[]);
+    ws.binaryType = 'arraybuffer';
+
+    return new Promise<boolean>((resolve, reject) => {
+      let settled = false;
+      let headerSent = false;
+      let inputFinished = false;
+      let pumping = false;
+
+      const cleanup = () => {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+      };
+      const settle = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+
+      // Drain `this.input`, sending a WAV header (sized for streaming) on the
+      // first real frame, then raw PCM per frame. Runs concurrently with
+      // message receipt; the awaited iterator naturally backpressures.
+      const pumpAudio = async () => {
+        pumping = true;
+        try {
+          while (true) {
+            const result = await inputIterator.next();
+            if (result.done) {
+              inputFinished = true;
+              break;
+            }
+            const value = result.value;
+            if (value === stt.SpeechStream.FLUSH_SENTINEL) {
+              // The Speko proxy flushes on its own cadence; a flush sentinel is
+              // an utterance boundary hint with no wire frame. Nothing to send.
+              continue;
+            }
+            const frame = value;
+            if (ws.readyState !== WS_OPEN) break;
+            if (!headerSent) {
+              ws.send(buildStreamingWavHeader(frame.sampleRate, frame.channels));
+              headerSent = true;
+            }
+            ws.send(pcmBytes(frame));
+          }
+          if (inputFinished && ws.readyState === WS_OPEN) {
+            ws.send(JSON.stringify({ type: 'end' }));
+          }
+        } catch (err) {
+          // A failure pumping audio (e.g. send on a closing socket) is
+          // reconnectable; let onclose/onerror drive the outcome.
+          this.#log(`audio pump error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+
+      ws.onopen = () => {
+        try {
+          ws.send(JSON.stringify(this.#configFrame()));
+        } catch (err) {
+          fail(err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+        void pumpAudio();
+      };
+
+      ws.onmessage = (evt: MessageEvent) => {
+        if (typeof evt.data !== 'string') return; // server only sends TEXT frames
+        let frame: unknown;
+        try {
+          frame = JSON.parse(evt.data);
+        } catch {
+          return;
+        }
+        const kind = (frame as { type?: unknown }).type;
+        if (kind === 'transcript') {
+          this.#emitTranscript(frame as ServerTranscriptFrame);
+        } else if (kind === 'error') {
+          const message = (frame as { message?: unknown }).message;
+          this.#log(`server error frame: ${typeof message === 'string' ? message : 'unknown'}`);
+        } else if (kind === 'end') {
+          // Server finished. If our input is also done, this is a clean end.
+          if (inputFinished) {
+            try {
+              ws.close(1000, 'done');
+            } catch {
+              // ignore
+            }
+            settle(true);
+          }
+        }
+        // `ready` is informational; nothing to do.
+      };
+
+      ws.onerror = () => {
+        // The Event carries no useful detail in the WHATWG API; onclose follows
+        // with a code. Treat as reconnectable unless input already finished.
+        if (inputFinished) {
+          settle(true);
+        } else {
+          fail(new Error('Speko streaming STT WebSocket error'));
+        }
+      };
+
+      ws.onclose = (evt: CloseEvent) => {
+        if (!pumping) {
+          // Closed before we ever opened/pumped — reconnectable.
+          fail(new Error(`Speko streaming STT WebSocket closed before open (code ${evt.code})`));
+          return;
+        }
+        // Clean close after we sent everything, or input is done → finished.
+        if (inputFinished || evt.code === 1000) {
+          settle(true);
+          return;
+        }
+        // Dropped mid-session with input still flowing → reconnect.
+        fail(new Error(`Speko streaming STT WebSocket closed unexpectedly (code ${evt.code})`));
+      };
+    });
+  }
+
+  #configFrame() {
+    return {
+      type: 'config' as const,
+      language: this.#opts.intent.language,
+      ...(this.#opts.intent.region !== undefined && { region: this.#opts.intent.region }),
+      ...(this.#opts.intent.optimizeFor !== undefined && {
+        optimizeFor: this.#opts.intent.optimizeFor,
+      }),
+      ...(this.#opts.constraints !== undefined && { constraints: this.#opts.constraints }),
+      ...(this.#opts.keywords !== undefined && { keywords: this.#opts.keywords }),
+    };
+  }
+
+  #emitTranscript(frame: ServerTranscriptFrame): void {
+    if (this.queue.closed) return;
+    const text = frame.text ?? '';
+    const isFinal = frame.isFinal === true;
+    if (!text && !isFinal) return;
+    const speechData: stt.SpeechData = {
+      language: this.#language,
+      text,
+      startTime: 0,
+      endTime: 0,
+      confidence: Number.isFinite(frame.confidence) ? frame.confidence : 1,
+    };
+    if (!this.#speaking) {
+      this.#speaking = true;
+      this.queue.put({ type: stt.SpeechEventType.START_OF_SPEECH });
+    }
+    if (isFinal) {
+      this.queue.put({ type: stt.SpeechEventType.FINAL_TRANSCRIPT, alternatives: [speechData] });
+      this.#speaking = false;
+      this.queue.put({ type: stt.SpeechEventType.END_OF_SPEECH });
+    } else {
+      this.queue.put({ type: stt.SpeechEventType.INTERIM_TRANSCRIPT, alternatives: [speechData] });
+    }
+  }
+
+  #emitError(error: Error): void {
+    // stt.SpeechStream is not an EventEmitter; the run() loop owns recovery
+    // (reconnect-or-end) and the AgentSession surfaces stream death via
+    // end-of-stream. The loud log is the observability channel.
+    this.#log(`error: ${error.message}`);
+  }
+
+  #log(message: string): void {
+    // Loud, per the spec — a streaming-STT failure should be obvious in logs.
+    console.error(`[speko.SpeechStream] ${message}`);
+  }
+}
+
+function toWsUrl(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  const ws = trimmed.replace(/^http(s?):\/\//, (_m, s) => `ws${s}://`);
+  return `${ws}/v1/transcribe/stream`;
+}
+
+/** Raw PCM bytes backing a frame's Int16 samples, offset/length-safe. */
+function pcmBytes(frame: AudioFrame): Uint8Array {
+  const data = frame.data;
+  return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+}
+
+/**
+ * A 44-byte PCM16 WAV header with streaming-sentinel sizes (0xFFFFFFFF). The
+ * proxy reads `byteRate` for duration billing and ignores the size fields, so
+ * an open-ended stream is expressed by leaving the sizes "unknown".
+ */
+export function buildStreamingWavHeader(sampleRate: number, channels: number): Uint8Array {
+  const out = new Uint8Array(WAV_HEADER_BYTES);
+  const view = new DataView(out.buffer);
+  const byteRate = (sampleRate * channels * WAV_BITS_PER_SAMPLE) / 8;
+  const blockAlign = (channels * WAV_BITS_PER_SAMPLE) / 8;
+
+  writeAscii(out, 0, 'RIFF');
+  view.setUint32(4, WAV_STREAMING_SIZE, true);
+  writeAscii(out, 8, 'WAVE');
+  writeAscii(out, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, WAV_PCM_FORMAT, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, WAV_BITS_PER_SAMPLE, true);
+  writeAscii(out, 36, 'data');
+  view.setUint32(40, WAV_STREAMING_SIZE, true);
+  return out;
+}
+
+function writeAscii(buf: Uint8Array, offset: number, text: string): void {
+  for (let i = 0; i < text.length; i++) {
+    buf[offset + i] = text.charCodeAt(i);
   }
 }

@@ -3,7 +3,7 @@ import { AudioFrame } from '@livekit/rtc-node';
 import type { Speko, TranscribeOptions, TranscribeResult } from '@spekoai/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import { parseWav } from './audio.js';
-import { SpekoSTT } from './stt.js';
+import { buildStreamingWavHeader, SpekoSTT } from './stt.js';
 
 function makeFakeSpeko(result: TranscribeResult): {
   speko: Speko;
@@ -162,5 +162,78 @@ describe('SpekoSTT', () => {
           },
         }),
     ).toThrow(/language/);
+  });
+});
+
+describe('SpekoSTT streaming mode', () => {
+  const base = { language: 'en' };
+
+  it('batch mode declares streaming: false', () => {
+    const { speko } = makeFakeSpeko({
+      text: '',
+      provider: 'deepgram',
+      model: 'nova-3',
+      confidence: 1,
+      failoverCount: 0,
+      scoresRunId: null,
+    });
+    const instance = new SpekoSTT({ speko, intent: base });
+    expect(instance.capabilities.streaming).toBe(false);
+  });
+
+  it('streaming mode declares streaming: true', () => {
+    const { speko } = makeFakeSpeko({
+      text: '',
+      provider: 'deepgram',
+      model: 'nova-3',
+      confidence: 1,
+      failoverCount: 0,
+      scoresRunId: null,
+    });
+    const instance = new SpekoSTT({
+      speko,
+      intent: base,
+      streaming: true,
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+    });
+    expect(instance.capabilities.streaming).toBe(true);
+  });
+
+  it('rejects streaming without baseUrl/apiKey', () => {
+    const { speko } = makeFakeSpeko({
+      text: '',
+      provider: 'deepgram',
+      model: 'nova-3',
+      confidence: 1,
+      failoverCount: 0,
+      scoresRunId: null,
+    });
+    expect(() => new SpekoSTT({ speko, intent: base, streaming: true })).toThrow(/baseUrl|apiKey/);
+  });
+});
+
+describe('buildStreamingWavHeader', () => {
+  it('writes a 44-byte PCM16 header with streaming-sentinel sizes', () => {
+    const header = buildStreamingWavHeader(16000, 1);
+    expect(header.byteLength).toBe(44);
+    const view = new DataView(header.buffer);
+    expect(String.fromCharCode(...header.slice(0, 4))).toBe('RIFF');
+    expect(String.fromCharCode(...header.slice(8, 12))).toBe('WAVE');
+    expect(view.getUint16(20, true)).toBe(1); // PCM
+    expect(view.getUint16(22, true)).toBe(1); // channels
+    expect(view.getUint32(24, true)).toBe(16000); // sample rate
+    expect(view.getUint32(28, true)).toBe(32000); // byte rate
+    expect(view.getUint16(32, true)).toBe(2); // block align
+    expect(view.getUint16(34, true)).toBe(16); // bits/sample
+    expect(view.getUint32(4, true)).toBe(0xffffffff);
+    expect(view.getUint32(40, true)).toBe(0xffffffff);
+  });
+
+  it('scales byteRate and blockAlign with channels', () => {
+    const header = buildStreamingWavHeader(48000, 2);
+    const view = new DataView(header.buffer);
+    expect(view.getUint32(28, true)).toBe(192000);
+    expect(view.getUint16(32, true)).toBe(4);
   });
 });

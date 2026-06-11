@@ -44,6 +44,32 @@ export interface CreateSpekoComponentsOptions {
    */
   sttOptions?: Pick<SpekoSTTOptions, 'keywords'>;
   /**
+   * Use the Speko proxy's native streaming STT WebSocket
+   * (`GET /v1/transcribe/stream`) instead of the VAD-bounded batch upload path.
+   * Defaults to `true`.
+   *
+   *   - `true`  → `components.stt` is a streaming {@link SpekoSTT} dropped
+   *               straight into the session; transcripts arrive incrementally
+   *               (interim + final) as the provider produces them. The session
+   *               still uses the {@link vad} you pass for turn detection.
+   *               Requires {@link sttBaseUrl} and {@link sttApiKey}.
+   *   - `false` → `components.stt` is the original `stt.StreamAdapter` wrapping
+   *               a batch SpekoSTT (one VAD-bounded WAV per turn). Unchanged.
+   */
+  sttStreaming?: boolean;
+  /**
+   * Speko proxy base URL for streaming STT (e.g. `https://api.speko.dev`).
+   * Required when {@link sttStreaming} is `true` (the default). Threaded
+   * explicitly because the `Speko` SDK client keeps its base URL private.
+   */
+  sttBaseUrl?: string;
+  /**
+   * Speko API key for streaming STT. Required when {@link sttStreaming} is
+   * `true` (the default). Threaded explicitly because the `Speko` SDK client
+   * keeps its key private.
+   */
+  sttApiKey?: string;
+  /**
    * Enable the registered-tools loader. When set, the LLM loads the tools
    * registered for this `agentId` via `speko.agents.tools.listChatTools(agentId)`
    * once per session and merges them with LiveKit's runtime ToolContext. Omit
@@ -65,8 +91,12 @@ export interface CreateSpekoComponentsOptions {
 }
 
 export interface SpekoComponents {
-  /** STT wrapped with `stt.StreamAdapter(…, vad)`. Drop straight into `AgentSession`. */
-  stt: stt.StreamAdapter;
+  /**
+   * STT, ready to drop into an `AgentSession`. When `sttStreaming` is `true`
+   * (default) this is a streaming `SpekoSTT` (native WS); when `false` it's the
+   * `stt.StreamAdapter`-wrapped batch path. Both satisfy `stt.STT`.
+   */
+  stt: stt.STT;
   /** LLM that calls Speko's `/v1/complete`. */
   llm: SpekoLLM;
   /** TTS wrapped with `tts.StreamAdapter(…, sentenceTokenizer)`. */
@@ -106,6 +136,13 @@ export interface SpekoComponents {
  * ```
  */
 export function createSpekoComponents(options: CreateSpekoComponentsOptions): SpekoComponents {
+  const sttStreaming = options.sttStreaming ?? true;
+  if (sttStreaming && (!options.sttBaseUrl || !options.sttApiKey)) {
+    throw new Error(
+      'createSpekoComponents: sttStreaming (the default) requires sttBaseUrl and sttApiKey — ' +
+        'pass both, or set sttStreaming: false for the batch path.',
+    );
+  }
   const sttOptions: SpekoSTTOptions = {
     speko: options.speko,
     intent: options.intent,
@@ -113,6 +150,11 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
     ...(options.sttOptions?.keywords && options.sttOptions.keywords.length > 0
       ? { keywords: options.sttOptions.keywords }
       : {}),
+    ...(sttStreaming && {
+      streaming: true,
+      baseUrl: options.sttBaseUrl,
+      apiKey: options.sttApiKey,
+    }),
   };
   const llmOptions: SpekoLLMOptions = {
     speko: options.speko,
@@ -145,7 +187,9 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   const sentenceTokenizer = options.sentenceTokenizer ?? new tokenize.basic.SentenceTokenizer();
 
   return {
-    stt: new stt.StreamAdapter(spekoSTT, options.vad),
+    // Streaming SpekoSTT manages its own WS lifecycle; the session still uses
+    // the caller's VAD for endpointing. Batch mode keeps the StreamAdapter wrap.
+    stt: sttStreaming ? spekoSTT : new stt.StreamAdapter(spekoSTT, options.vad),
     llm: spekoLLM,
     tts: new tts.StreamAdapter(spekoTTS, sentenceTokenizer),
   };
