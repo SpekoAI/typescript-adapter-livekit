@@ -1,5 +1,11 @@
 import type { AudioBuffer } from '@livekit/agents';
-import { type APIConnectOptions, asLanguageCode, type LanguageCode, stt } from '@livekit/agents';
+import {
+  type APIConnectOptions,
+  asLanguageCode,
+  createTimedString,
+  type LanguageCode,
+  stt,
+} from '@livekit/agents';
 import type { AudioFrame } from '@livekit/rtc-node';
 import type { PipelineConstraints, Speko } from '@spekoai/sdk';
 
@@ -43,6 +49,22 @@ export interface SpekoSTTOptions {
    * in batch mode.
    */
   apiKey?: string;
+  /**
+   * Declare `alignedTranscript: 'word'` in this STT's capabilities. Defaults to
+   * `false`. ONLY set this `true` when {@link streaming} is `true` AND the call
+   * is pinned (via {@link constraints}) to a single provider that actually
+   * emits word timings (Deepgram or ElevenLabs Scribe realtime).
+   *
+   * Why it must be gated: LiveKit reads `alignedTranscript` STATICALLY from
+   * capabilities (at session construction) to decide whether to enable its
+   * adaptive (ML) interruption detector, but Speko routing picks the provider
+   * PER CALL. If we declared `'word'` unconditionally and a call routed to a
+   * non-word provider (cartesia, kotib, google), we'd promise word timings we
+   * never deliver — LiveKit's detector would then see empty `words` arrays.
+   * `createSpekoComponents` only flips this true when the constraints pin a
+   * single known word-emitter; ad-hoc construction leaves it false (safe).
+   */
+  alignedTranscript?: boolean;
 }
 
 /**
@@ -75,7 +97,13 @@ export class SpekoSTT extends stt.STT {
 
   constructor(options: SpekoSTTOptions) {
     const streaming = options.streaming ?? false;
-    super({ streaming, interimResults: streaming });
+    // Only advertise word-aligned transcripts when we're streaming AND the
+    // caller has confirmed the pinned provider emits word timings. Declaring
+    // it is the precondition for LiveKit's adaptive interruption detector
+    // (`resolveInterruptionDetector` requires `capabilities.alignedTranscript`).
+    const alignedTranscript: 'word' | false =
+      streaming && options.alignedTranscript === true ? 'word' : false;
+    super({ streaming, interimResults: streaming, alignedTranscript });
     validateIntent(options.intent);
     if (streaming) {
       if (!options.baseUrl) {
@@ -178,12 +206,24 @@ interface SpekoSpeechStreamOptions {
   readonly connOptions?: APIConnectOptions;
 }
 
+/** Per-word timing on a transcript frame, in SECONDS. */
+interface ServerTranscriptWord {
+  text: string;
+  start: number;
+  end: number;
+  confidence?: number;
+}
+
 /** Server→client frame from `GET /v1/transcribe/stream`. */
 interface ServerTranscriptFrame {
   type: 'transcript';
   text: string;
   isFinal: boolean;
   confidence: number;
+  // Present only when the upstream provider emits word timings. When present,
+  // mapped into `SpeechData.words` (TimedString[]) so LiveKit's adaptive
+  // interruption detector can align the transcript against the audio.
+  words?: ServerTranscriptWord[];
 }
 
 const WAV_HEADER_BYTES = 44;
@@ -420,12 +460,26 @@ class SpekoSpeechStream extends stt.SpeechStream {
     const text = frame.text ?? '';
     const isFinal = frame.isFinal === true;
     if (!text && !isFinal) return;
+    // Map per-word timings into TimedString[] when the gateway forwarded them.
+    // LiveKit's adaptive interruption detector aligns these against the audio
+    // clock; SpeechData.startTime/endTime span the whole utterance.
+    const words = frame.words?.length
+      ? frame.words.map((w) =>
+          createTimedString({
+            text: w.text,
+            startTime: w.start,
+            endTime: w.end,
+            ...(Number.isFinite(w.confidence) ? { confidence: w.confidence } : {}),
+          }),
+        )
+      : undefined;
     const speechData: stt.SpeechData = {
       language: this.#language,
       text,
-      startTime: 0,
-      endTime: 0,
+      startTime: words?.length ? (words[0]?.startTime ?? 0) : 0,
+      endTime: words?.length ? (words[words.length - 1]?.endTime ?? 0) : 0,
       confidence: Number.isFinite(frame.confidence) ? frame.confidence : 1,
+      ...(words ? { words } : {}),
     };
     if (!this.#speaking) {
       this.#speaking = true;

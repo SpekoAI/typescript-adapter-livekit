@@ -7,6 +7,14 @@ import { SpekoLLM, type SpekoLLMOptions } from './llm.js';
 import { SpekoSTT, type SpekoSTTOptions } from './stt.js';
 import { SpekoTTS, type SpekoTTSOptions } from './tts.js';
 
+/**
+ * Streaming STT providers whose gateway frames carry word-level timestamps.
+ * Only these may enable `alignedTranscript` (and thus adaptive interruption);
+ * others stream text-only and must NOT claim word alignment. Keep in sync with
+ * which provider adapters populate `SttEvent.words`.
+ */
+const WORD_TIMESTAMP_STT_PROVIDERS = new Set(['deepgram', 'elevenlabs']);
+
 export interface CreateSpekoComponentsOptions {
   /** Initialised Speko client from `@spekoai/sdk`. */
   speko: Speko;
@@ -143,6 +151,19 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
         'pass both, or set sttStreaming: false for the batch path.',
     );
   }
+  // alignedTranscript (word timestamps) may only be declared when we can
+  // guarantee the routed provider actually emits words — capabilities are read
+  // STATICALLY by LiveKit before routing, so claiming 'word' for a provider
+  // that won't deliver would feed the adaptive interruption detector empty
+  // arrays. We only know the provider for certain when constraints pin exactly
+  // one, and only deepgram/elevenlabs emit word timings through the gateway.
+  const pinnedStt = options.constraints?.allowedProviders?.stt;
+  const alignedTranscript =
+    sttStreaming &&
+    Array.isArray(pinnedStt) &&
+    pinnedStt.length === 1 &&
+    WORD_TIMESTAMP_STT_PROVIDERS.has(String(pinnedStt[0]).toLowerCase());
+
   const sttOptions: SpekoSTTOptions = {
     speko: options.speko,
     intent: options.intent,
@@ -154,6 +175,7 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
       streaming: true,
       baseUrl: options.sttBaseUrl,
       apiKey: options.sttApiKey,
+      ...(alignedTranscript ? { alignedTranscript: true } : {}),
     }),
   };
   const llmOptions: SpekoLLMOptions = {
