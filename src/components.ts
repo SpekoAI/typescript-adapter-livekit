@@ -45,7 +45,7 @@ export interface CreateSpekoComponentsOptions {
   /** Optional per-session tools supplied by a pre-call config webhook. */
   tools?: ChatTool[];
   /** Optional TTS tuning (output sample rate, speed) forwarded to the TTS. */
-  ttsOptions?: Pick<SpekoTTSOptions, 'sampleRate' | 'speed'>;
+  ttsOptions?: Pick<SpekoTTSOptions, 'sampleRate' | 'speed' | 'instructions'>;
   /**
    * Optional STT tuning. Currently exposes `keywords` for domain-vocabulary
    * biasing — forwarded to the underlying provider via `speko.transcribe`.
@@ -196,6 +196,9 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
     intent: options.intent,
     ...(options.voice !== undefined && { voice: options.voice }),
     ...(options.ttsOptions?.speed !== undefined && { speed: options.ttsOptions.speed }),
+    ...(options.ttsOptions?.instructions !== undefined && {
+      instructions: options.ttsOptions.instructions,
+    }),
     ...(options.ttsOptions?.sampleRate !== undefined && {
       sampleRate: options.ttsOptions.sampleRate,
     }),
