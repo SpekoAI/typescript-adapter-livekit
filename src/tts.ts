@@ -27,12 +27,6 @@ export interface SpekoTTSOptions {
   /** Forwarded speech speed override. */
   speed?: number;
   /**
-   * Free-text speaking instruction (tone/pace/emotion). Forwarded to the Speko
-   * proxy, which delivers it only to instruction-capable TTS models and drops
-   * it for text-only ones.
-   */
-  instructions?: string;
-  /**
    * Output sample rate advertised to the LiveKit agent. Must match what the
    * upstream provider actually emits, otherwise playback will be pitched.
    * Defaults to 24000 (Cartesia Sonic default).
@@ -63,7 +57,6 @@ export class SpekoTTS extends tts.TTS {
   readonly #intent: Intent;
   readonly #voice?: string;
   readonly #speed?: number;
-  readonly #instructions?: string;
   readonly #sampleRate: number;
   readonly #constraints: PipelineConstraints | undefined;
 
@@ -75,7 +68,6 @@ export class SpekoTTS extends tts.TTS {
     this.#intent = options.intent;
     this.#voice = options.voice;
     this.#speed = options.speed;
-    this.#instructions = options.instructions;
     this.#sampleRate = sampleRate;
     this.#constraints = options.constraints;
   }
@@ -100,7 +92,6 @@ export class SpekoTTS extends tts.TTS {
       intent: this.#intent,
       voice: this.#voice,
       speed: this.#speed,
-      instructions: this.#instructions,
       expectedSampleRate: this.#sampleRate,
       constraints: this.#constraints,
       connOptions,
@@ -125,7 +116,6 @@ interface SpekoTTSChunkedStreamArgs {
   intent: Intent;
   voice?: string;
   speed?: number;
-  instructions?: string;
   expectedSampleRate: number;
   constraints?: PipelineConstraints;
   connOptions?: APIConnectOptions;
@@ -138,7 +128,6 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
   readonly #intent: Intent;
   readonly #voice?: string;
   readonly #speed?: number;
-  readonly #instructions?: string;
   readonly #expectedSampleRate: number;
   readonly #constraints: PipelineConstraints | undefined;
 
@@ -148,7 +137,6 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
     this.#intent = args.intent;
     this.#voice = args.voice;
     this.#speed = args.speed;
-    this.#instructions = args.instructions;
     this.#expectedSampleRate = args.expectedSampleRate;
     this.#constraints = args.constraints;
   }
@@ -189,7 +177,6 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
           }),
           ...(this.#voice !== undefined && { voice: this.#voice }),
           ...(this.#speed !== undefined && { speed: this.#speed }),
-          ...(this.#instructions !== undefined && { instructions: this.#instructions }),
           ...(this.#constraints !== undefined && { constraints: this.#constraints }),
         },
         this.abortSignal,
