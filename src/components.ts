@@ -44,8 +44,12 @@ export interface CreateSpekoComponentsOptions {
   llm?: Pick<SpekoLLMOptions, 'temperature' | 'maxTokens'>;
   /** Optional per-session tools supplied by a pre-call config webhook. */
   tools?: ChatTool[];
-  /** Optional TTS tuning (output sample rate, speed) forwarded to the TTS. */
-  ttsOptions?: Pick<SpekoTTSOptions, 'sampleRate' | 'speed'>;
+  /**
+   * Optional TTS tuning (output sample rate, speed, speaking-style instruction)
+   * forwarded to the TTS. `instructions` sets the initial value; callers can
+   * update it later via `components.ttsProvider.setInstructions(...)`.
+   */
+  ttsOptions?: Pick<SpekoTTSOptions, 'sampleRate' | 'speed' | 'instructions'>;
   /**
    * Optional STT tuning. Currently exposes `keywords` for domain-vocabulary
    * biasing — forwarded to the underlying provider via `speko.transcribe`.
@@ -198,6 +202,9 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
     ...(options.ttsOptions?.speed !== undefined && { speed: options.ttsOptions.speed }),
     ...(options.ttsOptions?.sampleRate !== undefined && {
       sampleRate: options.ttsOptions.sampleRate,
+    }),
+    ...(options.ttsOptions?.instructions !== undefined && {
+      instructions: options.ttsOptions.instructions,
     }),
     ...(options.constraints !== undefined && { constraints: options.constraints }),
   };
