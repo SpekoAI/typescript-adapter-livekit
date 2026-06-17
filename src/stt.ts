@@ -204,6 +204,17 @@ interface SpekoSpeechStreamOptions {
   readonly constraints: PipelineConstraints | undefined;
   readonly keywords: readonly string[] | undefined;
   readonly connOptions?: APIConnectOptions;
+  /**
+   * Reconnect policy override. Production uses {@link DEFAULT_RECONNECT_POLICY};
+   * tests shrink the delays/budget so the exhaustion path runs fast.
+   */
+  readonly reconnect?: Partial<ReconnectPolicy>;
+  /**
+   * WebSocket factory override (defaults to the global WHATWG `WebSocket`). Lets
+   * a test drive the reconnect / backoff / give-up paths with a fake socket and
+   * no network.
+   */
+  readonly createWebSocket?: WebSocketFactory;
 }
 
 /** Per-word timing on a transcript frame, in SECONDS. */
@@ -236,9 +247,91 @@ const WAV_BITS_PER_SAMPLE = 16;
 const WAV_STREAMING_SIZE = 0xffffffff;
 // WHATWG WebSocket.readyState OPEN.
 const WS_OPEN = 1;
-// Cap reconnects so a permanently-down proxy doesn't spin forever. Each loss of
-// the socket mid-session burns one attempt; a clean end just returns from run().
-const MAX_RECONNECTS = 3;
+
+/**
+ * Reconnect resilience policy. A transient socket drop (a network blip, a
+ * gateway pod cycling, the now-fixed server-side 4401 auth race) must NEVER
+ * permanently deafen a live call, so we reconnect with jittered exponential
+ * backoff and a budget that RESETS after any connection that stayed healthy for
+ * a while — a long call with occasional drops can't exhaust a fixed count. A
+ * truly dead endpoint still gives up after `maxConsecutive` rapid failures (so
+ * we don't spin forever), and giving up surfaces a recoverable:false error to
+ * the session instead of going silently quiet.
+ */
+export interface ReconnectPolicy {
+  /** Base backoff before exponential growth + jitter. */
+  baseDelayMs: number;
+  /** Backoff ceiling. */
+  maxDelayMs: number;
+  /** Consecutive failures (with no healthy connection between them) before giving up. */
+  maxConsecutive: number;
+  /** A connection open at least this long resets the consecutive-failure budget. */
+  healthyMs: number;
+  /** If the socket never opens within this, fail it so a half-open socket can't hang run(). */
+  openTimeoutMs: number;
+}
+
+export const DEFAULT_RECONNECT_POLICY: ReconnectPolicy = {
+  baseDelayMs: 250,
+  maxDelayMs: 5_000,
+  maxConsecutive: 5,
+  healthyMs: 10_000,
+  openTimeoutMs: 10_000,
+};
+
+/** The `stt_error` payload shape, derived from the exported callback type. */
+type SttErrorEvent = Parameters<stt.STTCallbacks['error']>[0];
+
+/**
+ * Jittered exponential backoff for reconnect attempt `attempt` (1-based). Full
+ * jitter in [exp/2, exp] where exp = min(base * 2^(attempt-1), max), so many
+ * concurrent sessions don't reconnect in lockstep and hammer a recovering
+ * gateway. Waiting this out with a REAL timer (see {@link SpekoSpeechStream})
+ * also guarantees the reconnect loop yields to the macrotask queue every
+ * iteration — it can never starve the worker event loop with a tight microtask
+ * spin. `rng` is injectable for deterministic tests.
+ */
+export function reconnectBackoffMs(
+  attempt: number,
+  policy: Pick<ReconnectPolicy, 'baseDelayMs' | 'maxDelayMs'> = DEFAULT_RECONNECT_POLICY,
+  rng: () => number = Math.random,
+): number {
+  const exp = Math.min(policy.baseDelayMs * 2 ** Math.max(0, attempt - 1), policy.maxDelayMs);
+  const half = exp / 2;
+  return Math.round(half + rng() * half);
+}
+
+/**
+ * Build the `stt_error` event the AgentSession listens for on the STT instance
+ * (`stt.on('error', …)`). Mirrors the framework's private `emitError` shape: we
+ * cannot trigger that by throwing from `run()` because `run()` is fire-and-forget
+ * via `startSoon` (a throw becomes an unhandled rejection), so emitting this
+ * directly is how a permanently-dead stream is surfaced to the session instead
+ * of silently going deaf. `recoverable: false` says it is gone for good.
+ */
+export function buildSttErrorEvent(label: string, error: Error): SttErrorEvent {
+  return {
+    type: 'stt_error',
+    timestamp: Date.now(),
+    label,
+    error,
+    recoverable: false,
+  };
+}
+
+/** Factory for the streaming socket. Overridable so tests can drive it without a network. */
+export type WebSocketFactory = (url: string, headers: Record<string, string>) => WebSocket;
+
+const defaultCreateWebSocket: WebSocketFactory = (url, headers) =>
+  // Node 22+ ships a global WHATWG `WebSocket`; the worker runs on Node 24. Using
+  // it avoids adding a `ws` dependency to this published package. The options arg
+  // (headers) is a Node extension to the WHATWG ctor signature.
+  new WebSocket(url, { headers } as unknown as string[]);
+
+/** Best-effort unref so a pending timer never keeps the worker process alive. */
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  (timer as unknown as { unref?: () => void }).unref?.();
+}
 
 /**
  * Long-lived streaming STT over the Speko proxy WebSocket. LiveKit calls
@@ -253,16 +346,22 @@ const MAX_RECONNECTS = 3;
  * which closes the output queue (an implicit "end"), so the AgentSession keeps
  * running (silently deaf) rather than throwing.
  */
-class SpekoSpeechStream extends stt.SpeechStream {
+export class SpekoSpeechStream extends stt.SpeechStream {
   label = 'speko.SpeechStream';
+  readonly #sttImpl: SpekoSTT;
   readonly #opts: SpekoSpeechStreamOptions;
   readonly #language: LanguageCode;
+  readonly #policy: ReconnectPolicy;
+  readonly #createWebSocket: WebSocketFactory;
   #speaking = false;
 
   constructor(sttImpl: SpekoSTT, opts: SpekoSpeechStreamOptions) {
     super(sttImpl);
+    this.#sttImpl = sttImpl;
     this.#opts = opts;
     this.#language = asLanguageCode(opts.intent.language);
+    this.#policy = { ...DEFAULT_RECONNECT_POLICY, ...(opts.reconnect ?? {}) };
+    this.#createWebSocket = opts.createWebSocket ?? defaultCreateWebSocket;
   }
 
   protected async run(): Promise<void> {
@@ -272,30 +371,49 @@ class SpekoSpeechStream extends stt.SpeechStream {
     // from wherever the previous socket left off.
     const inputIterator = this.input[Symbol.asyncIterator]();
     let inputDone = false;
-    let reconnects = 0;
+    let consecutiveFailures = 0;
 
     while (!this.closed && !inputDone) {
+      const connectionStartedAt = Date.now();
       try {
         inputDone = await this.#runOneConnection(inputIterator);
+        consecutiveFailures = 0; // clean end / success
       } catch (err) {
-        // Loud, never fatal. Surface as an STT error event for observability,
-        // then decide whether to reconnect.
+        // Loud, never fatal. Log for observability, then decide whether to
+        // reconnect (with backoff) or give up (surfacing an error event).
         const error = err instanceof Error ? err : new Error(String(err));
         this.#emitError(error);
         if (this.closed || inputDone) break;
-        reconnects += 1;
-        if (reconnects > MAX_RECONNECTS) {
-          this.#log(
-            `giving up after ${MAX_RECONNECTS} reconnect attempts; ending stream (session continues)`,
-          );
+
+        // A socket that stayed up for a healthy stretch before dropping is a
+        // transient blip, not a flapping endpoint — reset the budget so a long
+        // call with occasional drops never exhausts a fixed count.
+        if (Date.now() - connectionStartedAt >= this.#policy.healthyMs) {
+          consecutiveFailures = 0;
+        }
+        consecutiveFailures += 1;
+        if (consecutiveFailures > this.#policy.maxConsecutive) {
+          this.#giveUp(error);
           break;
         }
-        this.#log(`reconnecting (attempt ${reconnects}/${MAX_RECONNECTS}) after: ${error.message}`);
+        const backoffMs = reconnectBackoffMs(consecutiveFailures, this.#policy);
+        this.#log(
+          `reconnecting (attempt ${consecutiveFailures}/${this.#policy.maxConsecutive}) in ${backoffMs}ms after: ${error.message}`,
+        );
+        await this.#sleep(backoffMs);
       }
     }
-    // Returning here causes the base class to close the output queue, which the
-    // AgentSession reads as end-of-stream. We never re-throw — a dead WS must
-    // not take down the call.
+
+    // If we stopped reconnecting while audio is still flowing (we gave up), keep
+    // draining the framework's input queue in the background so it can't grow
+    // unbounded for the rest of the call — the base class's `pumpInput` keeps
+    // feeding it regardless of whether `run()` is still consuming. A dead STT
+    // stream must never wedge or balloon the job. Returning from `run()` also
+    // closes the output queue (an implicit end-of-stream); we never re-throw — a
+    // dead WS must not take down the call.
+    if (!inputDone && !this.closed) {
+      void this.#drainAfterGiveUp(inputIterator);
+    }
   }
 
   /**
@@ -308,12 +426,7 @@ class SpekoSpeechStream extends stt.SpeechStream {
     inputIterator: AsyncIterator<AudioFrame | typeof stt.SpeechStream.FLUSH_SENTINEL>,
   ): Promise<boolean> {
     const url = toWsUrl(this.#opts.baseUrl);
-    // Node 22+ ships a global WHATWG `WebSocket`; the worker runs on Node 24.
-    // Using it avoids adding a `ws` dependency to this published package. The
-    // options arg (headers) is a Node extension to the WHATWG ctor signature.
-    const ws = new WebSocket(url, {
-      headers: { Authorization: `Bearer ${this.#opts.apiKey}` },
-    } as unknown as string[]);
+    const ws = this.#createWebSocket(url, { Authorization: `Bearer ${this.#opts.apiKey}` });
     ws.binaryType = 'arraybuffer';
 
     return new Promise<boolean>((resolve, reject) => {
@@ -321,8 +434,11 @@ class SpekoSpeechStream extends stt.SpeechStream {
       let headerSent = false;
       let inputFinished = false;
       let pumping = false;
+      let opened = false;
+      let openTimer: ReturnType<typeof setTimeout>;
 
       const cleanup = () => {
+        clearTimeout(openTimer);
         ws.onopen = null;
         ws.onmessage = null;
         ws.onerror = null;
@@ -338,8 +454,29 @@ class SpekoSpeechStream extends stt.SpeechStream {
         if (settled) return;
         settled = true;
         cleanup();
+        // Best-effort close so a half-open / abandoned socket doesn't leak.
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
         reject(err);
       };
+
+      // Watchdog: a socket that never opens (half-open TCP, a black-holed proxy)
+      // would never fire open/close/error, so this promise would hang forever —
+      // silently deafening the call with no reconnect. Time it out into a
+      // reconnectable failure so the run loop can back off and retry.
+      openTimer = setTimeout(() => {
+        if (!opened) {
+          fail(
+            new Error(
+              `Speko streaming STT WebSocket did not open within ${this.#policy.openTimeoutMs}ms`,
+            ),
+          );
+        }
+      }, this.#policy.openTimeoutMs);
+      unrefTimer(openTimer);
 
       // Drain `this.input`, sending a WAV header (sized for streaming) on the
       // first real frame, then raw PCM per frame. Runs concurrently with
@@ -378,6 +515,8 @@ class SpekoSpeechStream extends stt.SpeechStream {
       };
 
       ws.onopen = () => {
+        opened = true;
+        clearTimeout(openTimer);
         try {
           ws.send(JSON.stringify(this.#configFrame()));
         } catch (err) {
@@ -495,10 +634,67 @@ class SpekoSpeechStream extends stt.SpeechStream {
   }
 
   #emitError(error: Error): void {
-    // stt.SpeechStream is not an EventEmitter; the run() loop owns recovery
-    // (reconnect-or-end) and the AgentSession surfaces stream death via
-    // end-of-stream. The loud log is the observability channel.
+    // Per-failure observability. The run() loop owns recovery (reconnect with
+    // backoff); a permanent give-up additionally surfaces a session error via
+    // #giveUp. The loud log is the per-attempt channel.
     this.#log(`error: ${error.message}`);
+  }
+
+  /**
+   * Reconnects are exhausted with audio still flowing. Log loudly AND surface a
+   * recoverable:false error to the AgentSession so the call doesn't just go
+   * silently deaf — the session's error handler sees a real STT error event.
+   */
+  #giveUp(error: Error): void {
+    this.#log(
+      `giving up after ${this.#policy.maxConsecutive} consecutive reconnect attempts — ` +
+        `the live session will stop receiving transcripts (last error: ${error.message})`,
+    );
+    this.#surfaceSessionError(
+      new Error(
+        `Speko streaming STT permanently lost after ${this.#policy.maxConsecutive} reconnect attempts: ${error.message}`,
+      ),
+    );
+  }
+
+  /**
+   * Emit the framework's `stt_error` event on the STT instance so the
+   * AgentSession's error handler observes it. We can't throw from run() (it's
+   * fire-and-forget via startSoon → unhandled rejection) and the base class's
+   * emitError is private, so this is the safe surfacing path. Best-effort:
+   * surfacing must never break the run loop.
+   */
+  #surfaceSessionError(error: Error): void {
+    try {
+      this.#sttImpl.emit('error', buildSttErrorEvent(this.label, error));
+    } catch {
+      // ignore — observability must not take down the call
+    }
+  }
+
+  /** A real timer-backed sleep — guarantees the reconnect loop yields the event loop. */
+  #sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      unrefTimer(setTimeout(resolve, ms));
+    });
+  }
+
+  /**
+   * After giving up, keep consuming `this.input` to nowhere until the stream is
+   * closed. The base class's pumpInput keeps feeding the queue for the rest of
+   * the call; draining it prevents unbounded growth without re-opening a socket.
+   */
+  async #drainAfterGiveUp(
+    inputIterator: AsyncIterator<AudioFrame | typeof stt.SpeechStream.FLUSH_SENTINEL>,
+  ): Promise<void> {
+    try {
+      while (!this.closed) {
+        const { done } = await inputIterator.next();
+        if (done) break;
+      }
+    } catch {
+      // Stream torn down — nothing to do.
+    }
   }
 
   #log(message: string): void {

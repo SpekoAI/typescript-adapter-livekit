@@ -1,9 +1,17 @@
-import { stt } from '@livekit/agents';
+import { initializeLogger, stt } from '@livekit/agents';
 import { AudioFrame } from '@livekit/rtc-node';
 import type { Speko, TranscribeOptions, TranscribeResult } from '@spekoai/sdk';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseWav } from './audio.js';
-import { buildStreamingWavHeader, SpekoSTT } from './stt.js';
+import {
+  buildStreamingWavHeader,
+  buildSttErrorEvent,
+  DEFAULT_RECONNECT_POLICY,
+  reconnectBackoffMs,
+  SpekoSpeechStream,
+  SpekoSTT,
+  type WebSocketFactory,
+} from './stt.js';
 
 function makeFakeSpeko(result: TranscribeResult): {
   speko: Speko;
@@ -235,5 +243,200 @@ describe('buildStreamingWavHeader', () => {
     const view = new DataView(header.buffer);
     expect(view.getUint32(28, true)).toBe(192000);
     expect(view.getUint16(32, true)).toBe(4);
+  });
+});
+
+describe('reconnectBackoffMs', () => {
+  const policy = { baseDelayMs: 250, maxDelayMs: 5000 };
+
+  it('grows exponentially and stays within the full-jitter band [exp/2, exp]', () => {
+    // attempt 1 → exp 250 → [125, 250]; attempt 3 → exp 1000 → [500, 1000].
+    expect(reconnectBackoffMs(1, policy, () => 0)).toBe(125);
+    expect(reconnectBackoffMs(1, policy, () => 1)).toBe(250);
+    expect(reconnectBackoffMs(3, policy, () => 0)).toBe(500);
+    expect(reconnectBackoffMs(3, policy, () => 1)).toBe(1000);
+  });
+
+  it('caps at maxDelayMs no matter how high the attempt count', () => {
+    // exp would be astronomically large; it must clamp to the ceiling.
+    expect(reconnectBackoffMs(40, policy, () => 1)).toBe(5000);
+    expect(reconnectBackoffMs(40, policy, () => 0)).toBe(2500);
+  });
+
+  it('never returns a delay below half the base or above the ceiling for any rng', () => {
+    for (let attempt = 1; attempt <= 20; attempt++) {
+      const v = reconnectBackoffMs(attempt, policy, () => Math.random());
+      expect(v).toBeGreaterThanOrEqual(policy.baseDelayMs / 2);
+      expect(v).toBeLessThanOrEqual(policy.maxDelayMs);
+    }
+  });
+});
+
+describe('buildSttErrorEvent', () => {
+  it('builds a recoverable:false stt_error event the AgentSession can observe', () => {
+    const err = new Error('boom');
+    const ev = buildSttErrorEvent('speko.SpeechStream', err);
+    expect(ev.type).toBe('stt_error');
+    expect(ev.recoverable).toBe(false);
+    expect(ev.label).toBe('speko.SpeechStream');
+    expect(ev.error).toBe(err);
+    expect(typeof ev.timestamp).toBe('number');
+  });
+});
+
+describe('SpekoSpeechStream reconnect resilience', () => {
+  const base = { language: 'en' };
+  // Tiny delays so the reconnect/backoff loop runs fast; huge healthyMs so a
+  // fast failure storm never resets the budget; short openTimeout never trips
+  // because the fakes close on the next tick.
+  const fastReconnect = {
+    baseDelayMs: 1,
+    maxDelayMs: 2,
+    maxConsecutive: 2,
+    healthyMs: 1_000_000,
+    openTimeoutMs: 50,
+  };
+
+  // Plain object that structurally satisfies the WHATWG WebSocket surface the
+  // stream drives; cast to WebSocket at the factory boundary.
+  function fakeWs() {
+    return {
+      binaryType: 'blob',
+      readyState: 0,
+      send: () => {},
+      close: () => {},
+      onopen: null as ((ev?: unknown) => void) | null,
+      onmessage: null as ((ev: { data: unknown }) => void) | null,
+      onerror: null as ((ev?: unknown) => void) | null,
+      onclose: null as ((ev: { code: number; reason?: string }) => void) | null,
+    };
+  }
+
+  function makeStreamingStt() {
+    const { speko } = makeFakeSpeko({
+      text: '',
+      provider: 'deepgram',
+      model: 'nova-3',
+      confidence: 1,
+      failoverCount: 0,
+      scoresRunId: null,
+    });
+    return new SpekoSTT({
+      speko,
+      intent: base,
+      streaming: true,
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+    });
+  }
+
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    // The base SpeechStream constructor instantiates the framework logger, which
+    // requires this in a unit context (no worker bootstrap runs it).
+    initializeLogger({ pretty: false, level: 'fatal' });
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  it('uses production defaults (5 consecutive reconnects, 5s ceiling)', () => {
+    expect(DEFAULT_RECONNECT_POLICY.maxConsecutive).toBe(5);
+    expect(DEFAULT_RECONNECT_POLICY.maxDelayMs).toBe(5000);
+  });
+
+  it('surfaces a recoverable:false error to the session after reconnects are exhausted (no silent deafness)', async () => {
+    const sttImpl = makeStreamingStt();
+    const errors: { type: string; recoverable: boolean; error: Error }[] = [];
+    sttImpl.on('error', (e) => errors.push(e));
+
+    // Every socket drops before it opens → every attempt fails → exhaustion.
+    const createWebSocket: WebSocketFactory = () => {
+      const ws = fakeWs();
+      setTimeout(() => ws.onclose?.({ code: 4401 }), 0);
+      return ws as unknown as WebSocket;
+    };
+
+    const stream = new SpekoSpeechStream(sttImpl, {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      createWebSocket,
+      reconnect: fastReconnect,
+    });
+
+    await vi.waitFor(() => expect(errors.length).toBeGreaterThan(0), {
+      timeout: 3000,
+      interval: 5,
+    });
+    expect(errors[0]?.type).toBe('stt_error');
+    expect(errors[0]?.recoverable).toBe(false);
+    expect(errors[0]?.error.message).toMatch(/permanently lost/);
+    stream.close();
+  });
+
+  it('recovers from a transient socket drop without deafening the call (reconnects, emits transcript, no error)', async () => {
+    const sttImpl = makeStreamingStt();
+    const errors: unknown[] = [];
+    sttImpl.on('error', (e) => errors.push(e));
+
+    let attempt = 0;
+    const createWebSocket: WebSocketFactory = () => {
+      attempt += 1;
+      const ws = fakeWs();
+      if (attempt === 1) {
+        // First socket drops mid-handshake (transient blip).
+        setTimeout(() => ws.onclose?.({ code: 1006 }), 0);
+      } else {
+        // Second socket connects, transcribes, and ends cleanly.
+        setTimeout(() => {
+          ws.readyState = 1; // OPEN
+          ws.onopen?.();
+          ws.onmessage?.({
+            data: JSON.stringify({ type: 'ready', provider: 'deepgram', model: 'nova-3' }),
+          });
+          ws.onmessage?.({
+            data: JSON.stringify({
+              type: 'transcript',
+              text: 'hello world',
+              isFinal: true,
+              confidence: 0.9,
+            }),
+          });
+          ws.onclose?.({ code: 1000 });
+        }, 0);
+      }
+      return ws as unknown as WebSocket;
+    };
+
+    const stream = new SpekoSpeechStream(sttImpl, {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      createWebSocket,
+      reconnect: { ...fastReconnect, maxConsecutive: 5 },
+    });
+
+    const got: stt.SpeechEvent[] = [];
+    const reader = (async () => {
+      for await (const ev of stream) got.push(ev);
+    })();
+
+    await vi.waitFor(
+      () => expect(got.some((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT)).toBe(true),
+      { timeout: 3000, interval: 5 },
+    );
+    stream.close();
+    await reader;
+
+    expect(attempt).toBeGreaterThanOrEqual(2); // it really did reconnect
+    expect(errors).toHaveLength(0); // a transient drop must NOT surface a fatal error
+    const final = got.find((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT);
+    expect(final?.alternatives?.[0]?.text).toBe('hello world');
   });
 });
