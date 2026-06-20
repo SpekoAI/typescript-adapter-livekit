@@ -307,7 +307,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
     // Starvation-safe: we only ever DELAY when ahead, never when behind, so TTFB and
     // under-realtime providers are unaffected.
     const FRAME_MS = 20;
-    const LOOKAHEAD_MS = 400;
+    const LOOKAHEAD_MS = 150;
     let pending: AudioFrame | undefined;
     let pushed = 0;
     let bytes = 0;
