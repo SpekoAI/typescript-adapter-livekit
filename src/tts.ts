@@ -299,12 +299,27 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
 
     const samplesPerFrame = Math.round(sampleRate / 50);
     const bstream = new AudioByteStream(sampleRate, NUM_CHANNELS, samplesPerFrame);
+    // Each frame is 20ms of audio (sampleRate / 50). Providers (Cartesia, EL) emit
+    // 4-5x faster than realtime, so pushing every frame the instant it arrives floods
+    // the playout pipeline with seconds of audio ahead — which keeps draining after a
+    // barge-in (server yields in ~70ms but the buffered audio plays on). Pace the push
+    // to stay at most LOOKAHEAD_MS ahead of realtime so a barge-in has ~nothing to drain.
+    // Starvation-safe: we only ever DELAY when ahead, never when behind, so TTFB and
+    // under-realtime providers are unaffected.
+    const FRAME_MS = 20;
+    const LOOKAHEAD_MS = 400;
     let pending: AudioFrame | undefined;
     let pushed = 0;
     let bytes = 0;
     let firstFrameMs: number | undefined;
-    const flush = (final: boolean) => {
+    const playoutStart = Date.now();
+    const flush = async (final: boolean) => {
       if (!pending) return;
+      // How far the next frame's scheduled playout time is ahead of realtime.
+      const aheadMs = pushed * FRAME_MS - (Date.now() - playoutStart);
+      if (aheadMs > LOOKAHEAD_MS) {
+        await new Promise((resolve) => setTimeout(resolve, aheadMs - LOOKAHEAD_MS));
+      }
       this.queue.put({
         requestId,
         segmentId: requestId,
@@ -319,15 +334,15 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
     for await (const chunk of streamed) {
       bytes += chunk.byteLength;
       for (const frame of bstream.write(chunk)) {
-        flush(false);
+        await flush(false);
         pending = frame;
       }
     }
     for (const frame of bstream.flush()) {
-      flush(false);
+      await flush(false);
       pending = frame;
     }
-    flush(true);
+    await flush(true);
 
     if (pushed === 0) {
       logger.error({ requestId }, '[SpekoTTS] synthesize:empty-frames');
