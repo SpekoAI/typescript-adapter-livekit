@@ -191,6 +191,10 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
           ...(this.#speed !== undefined && { speed: this.#speed }),
           ...(this.#instructions !== undefined && { instructions: this.#instructions }),
           ...(this.#constraints !== undefined && { constraints: this.#constraints }),
+          // Voice agents speak LLM output, so always request spoken-form
+          // normalization (markdown/number scrub) — the deterministic safety net
+          // beneath the voice directive. Server kill-switch: SPEKO_SPOKEN_FORM_ENABLED=false.
+          spokenForm: true,
         },
         this.abortSignal,
       );
