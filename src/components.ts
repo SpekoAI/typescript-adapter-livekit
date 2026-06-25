@@ -171,6 +171,7 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   const sttOptions: SpekoSTTOptions = {
     speko: options.speko,
     intent: options.intent,
+    ...(options.sessionId !== undefined && { sessionId: options.sessionId }),
     ...(options.constraints !== undefined && { constraints: options.constraints }),
     ...(options.sttOptions?.keywords && options.sttOptions.keywords.length > 0
       ? { keywords: options.sttOptions.keywords }

@@ -439,4 +439,55 @@ describe('SpekoSpeechStream reconnect resilience', () => {
     const final = got.find((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT);
     expect(final?.alternatives?.[0]?.text).toBe('hello world');
   });
+
+  it('gives up instead of reconnecting forever when connections carry no audio (SPE-121)', async () => {
+    const sttImpl = makeStreamingStt();
+    const errors: { type: string; recoverable: boolean; error: Error }[] = [];
+    sttImpl.on('error', (e) => errors.push(e));
+
+    let attempts = 0;
+    // Every socket drops without ever carrying audio. With `healthyMs: 0`, EVERY
+    // failure "survives the healthy window" — so the ONLY thing standing between
+    // this and an infinite reconnect loop is the new `&& audioPumped` guard.
+    // Pre-fix (reset on survival alone) this is the exact SPE-121 prod pathology:
+    // a no-audio stream 1011s at the idle timeout, resets the budget, and
+    // reconnects forever (heavy 1011 spam, even on idle workers). Post-fix the
+    // budget climbs and the stream gives up after maxConsecutive.
+    const createWebSocket: WebSocketFactory = () => {
+      attempts += 1;
+      const ws = fakeWs();
+      setTimeout(() => ws.onclose?.({ code: 1011, reason: 'all_providers_failed' }), 0);
+      return ws as unknown as WebSocket;
+    };
+
+    const stream = new SpekoSpeechStream(sttImpl, {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      createWebSocket,
+      reconnect: {
+        baseDelayMs: 1,
+        maxDelayMs: 2,
+        maxConsecutive: 3,
+        healthyMs: 0,
+        openTimeoutMs: 50,
+      },
+    });
+
+    // The stream must GIVE UP (surface a fatal error) rather than loop forever.
+    // Pre-fix this never fires (infinite reconnect) → the waitFor times out.
+    await vi.waitFor(() => expect(errors.length).toBeGreaterThan(0), {
+      timeout: 3000,
+      interval: 5,
+    });
+    expect(errors[0]?.recoverable).toBe(false);
+    expect(errors[0]?.error.message).toMatch(/permanently lost/);
+    stream.close();
+
+    // Bounded: 1 initial attempt + maxConsecutive(3) reconnects. A reset-on-
+    // survival loop would have called this an unbounded number of times.
+    expect(attempts).toBeLessThanOrEqual(4);
+  });
 });

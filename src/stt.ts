@@ -65,6 +65,13 @@ export interface SpekoSTTOptions {
    * single known word-emitter; ad-hoc construction leaves it false (safe).
    */
   alignedTranscript?: boolean;
+  /**
+   * Optional session id, used purely to tag the streaming-STT log lines so a
+   * given call's reconnect / give-up activity can be bucketed in aggregated
+   * logs (SPE-121 — before this, a `[speko.SpeechStream]` line carried no
+   * call identity, so a 1011 storm couldn't be attributed to a session).
+   */
+  sessionId?: string;
 }
 
 /**
@@ -94,6 +101,7 @@ export class SpekoSTT extends stt.STT {
   readonly #streaming: boolean;
   readonly #baseUrl: string | undefined;
   readonly #apiKey: string | undefined;
+  readonly #sessionId: string | undefined;
 
   constructor(options: SpekoSTTOptions) {
     const streaming = options.streaming ?? false;
@@ -126,6 +134,7 @@ export class SpekoSTT extends stt.STT {
     this.#streaming = streaming;
     this.#baseUrl = options.baseUrl;
     this.#apiKey = options.apiKey;
+    this.#sessionId = options.sessionId;
   }
 
   override get provider(): string {
@@ -190,6 +199,7 @@ export class SpekoSTT extends stt.STT {
       intent: this.#intent,
       constraints: this.#constraints,
       keywords: this.#keywords,
+      ...(this.#sessionId !== undefined && { sessionId: this.#sessionId }),
       ...(options?.connOptions ? { connOptions: options.connOptions } : {}),
     });
   }
@@ -203,6 +213,8 @@ interface SpekoSpeechStreamOptions {
   readonly intent: Intent;
   readonly constraints: PipelineConstraints | undefined;
   readonly keywords: readonly string[] | undefined;
+  /** Session id for log tagging (SPE-121 observability). */
+  readonly sessionId?: string;
   readonly connOptions?: APIConnectOptions;
   /**
    * Reconnect policy override. Production uses {@link DEFAULT_RECONNECT_POLICY};
@@ -353,6 +365,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
   readonly #language: LanguageCode;
   readonly #policy: ReconnectPolicy;
   readonly #createWebSocket: WebSocketFactory;
+  readonly #sessionId: string | undefined;
   #speaking = false;
 
   constructor(sttImpl: SpekoSTT, opts: SpekoSpeechStreamOptions) {
@@ -362,6 +375,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     this.#language = asLanguageCode(opts.intent.language);
     this.#policy = { ...DEFAULT_RECONNECT_POLICY, ...(opts.reconnect ?? {}) };
     this.#createWebSocket = opts.createWebSocket ?? defaultCreateWebSocket;
+    this.#sessionId = opts.sessionId;
   }
 
   protected async run(): Promise<void> {
@@ -372,33 +386,46 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     const inputIterator = this.input[Symbol.asyncIterator]();
     let inputDone = false;
     let consecutiveFailures = 0;
+    // Whether ANY connection in this stream's life carried real audio. Surfaced
+    // in the give-up log so a never-heard stream (leaked/duplicate, or an
+    // unsubscribed caller track) is distinguishable from a genuinely failing
+    // live call.
+    let everPumpedAudio = false;
 
     while (!this.closed && !inputDone) {
       const connectionStartedAt = Date.now();
+      const progress = { audioPumped: false };
       try {
-        inputDone = await this.#runOneConnection(inputIterator);
+        inputDone = await this.#runOneConnection(inputIterator, progress);
         consecutiveFailures = 0; // clean end / success
       } catch (err) {
         // Loud, never fatal. Log for observability, then decide whether to
         // reconnect (with backoff) or give up (surfacing an error event).
         const error = err instanceof Error ? err : new Error(String(err));
+        if (progress.audioPumped) everPumpedAudio = true;
         this.#emitError(error);
         if (this.closed || inputDone) break;
 
-        // A socket that stayed up for a healthy stretch before dropping is a
-        // transient blip, not a flapping endpoint — reset the budget so a long
-        // call with occasional drops never exhausts a fixed count.
-        if (Date.now() - connectionStartedAt >= this.#policy.healthyMs) {
+        // Reset the budget ONLY when the dropped connection both stayed up a
+        // healthy stretch AND actually carried audio. A connection that opened
+        // but pumped ZERO audio — a leaked/duplicate stream, or a call whose
+        // caller track never subscribed — is NOT healthy: healthyMs (~10s)
+        // equals the upstream's no-audio idle timeout, so before this guard such
+        // a stream 1011'd at ~10s, reset the budget purely by surviving, and
+        // reconnected FOREVER (SPE-121: heavy 1011 spam, even on idle workers).
+        // Requiring real audio means a no-audio stream exhausts the budget and
+        // gives up after maxConsecutive instead of looping.
+        if (Date.now() - connectionStartedAt >= this.#policy.healthyMs && progress.audioPumped) {
           consecutiveFailures = 0;
         }
         consecutiveFailures += 1;
         if (consecutiveFailures > this.#policy.maxConsecutive) {
-          this.#giveUp(error);
+          this.#giveUp(error, everPumpedAudio);
           break;
         }
         const backoffMs = reconnectBackoffMs(consecutiveFailures, this.#policy);
         this.#log(
-          `reconnecting (attempt ${consecutiveFailures}/${this.#policy.maxConsecutive}) in ${backoffMs}ms after: ${error.message}`,
+          `reconnecting (attempt ${consecutiveFailures}/${this.#policy.maxConsecutive}, audioReceived=${everPumpedAudio}) in ${backoffMs}ms after: ${error.message}`,
         );
         await this.#sleep(backoffMs);
       }
@@ -424,6 +451,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
    */
   #runOneConnection(
     inputIterator: AsyncIterator<AudioFrame | typeof stt.SpeechStream.FLUSH_SENTINEL>,
+    progress: { audioPumped: boolean },
   ): Promise<boolean> {
     const url = toWsUrl(this.#opts.baseUrl);
     const ws = this.#createWebSocket(url, { Authorization: `Bearer ${this.#opts.apiKey}` });
@@ -503,6 +531,10 @@ export class SpekoSpeechStream extends stt.SpeechStream {
               headerSent = true;
             }
             ws.send(pcmBytes(frame));
+            // Mark that this connection carried real audio — the run loop uses
+            // this to decide whether a drop counts as a "healthy" reconnect or
+            // whether a no-audio stream should give up (SPE-121).
+            progress.audioPumped = true;
           }
           if (inputFinished && ws.readyState === WS_OPEN) {
             ws.send(JSON.stringify({ type: 'end' }));
@@ -645,10 +677,11 @@ export class SpekoSpeechStream extends stt.SpeechStream {
    * recoverable:false error to the AgentSession so the call doesn't just go
    * silently deaf — the session's error handler sees a real STT error event.
    */
-  #giveUp(error: Error): void {
+  #giveUp(error: Error, audioReceived: boolean): void {
     this.#log(
-      `giving up after ${this.#policy.maxConsecutive} consecutive reconnect attempts — ` +
-        `the live session will stop receiving transcripts (last error: ${error.message})`,
+      `giving up after ${this.#policy.maxConsecutive} consecutive reconnect attempts ` +
+        `(audioReceived=${audioReceived}) — the live session will stop receiving transcripts ` +
+        `(last error: ${error.message})`,
     );
     this.#surfaceSessionError(
       new Error(
@@ -699,7 +732,11 @@ export class SpekoSpeechStream extends stt.SpeechStream {
 
   #log(message: string): void {
     // Loud, per the spec — a streaming-STT failure should be obvious in logs.
-    console.error(`[speko.SpeechStream] ${message}`);
+    // Tag with the session id (when known) so a 1011 storm in aggregated logs
+    // can be attributed to a specific call rather than being un-bucketable
+    // (SPE-121).
+    const tag = this.#sessionId ? `speko.SpeechStream ${this.#sessionId}` : 'speko.SpeechStream';
+    console.error(`[${tag}] ${message}`);
   }
 }
 
