@@ -1,9 +1,10 @@
 import type { VAD } from '@livekit/agents';
-import { stt, tokenize, tts } from '@livekit/agents';
+import { stt, type tokenize, tts } from '@livekit/agents';
 import type { ChatTool, PipelineConstraints, Speko } from '@spekoai/sdk';
 
 import type { Intent } from './intent.js';
 import { SpekoLLM, type SpekoLLMOptions } from './llm.js';
+import { createDefaultSentenceTokenizer } from './sentence-tokenizer.js';
 import { SpekoSTT, type SpekoSTTOptions } from './stt.js';
 import { SpekoTTS, type SpekoTTSOptions } from './tts.js';
 
@@ -214,7 +215,9 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   const spekoLLM = new SpekoLLM(llmOptions);
   const spekoTTS = new SpekoTTS(ttsOptions);
 
-  const sentenceTokenizer = options.sentenceTokenizer ?? new tokenize.basic.SentenceTokenizer();
+  // retainFormat keeps inter-sentence whitespace so the agent transcript (built
+  // by concatenating these tokens) doesn't glue sentences together (SPE-141).
+  const sentenceTokenizer = options.sentenceTokenizer ?? createDefaultSentenceTokenizer();
 
   return {
     // Streaming SpekoSTT manages its own WS lifecycle; the session still uses
