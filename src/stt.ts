@@ -346,6 +346,16 @@ function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
 }
 
 /**
+ * Opt-in flush-endpoint path (read per-call so tests / runtime env changes take
+ * effect without a re-import). When on, the framework's utterance-boundary
+ * FLUSH_SENTINEL is forwarded to the proxy as a `{type:'flush'}` frame; default
+ * off → the sentinel is swallowed exactly as before. See SPEKO_NAVAI_FLUSH_ENDPOINT.
+ */
+function flushEndpointEnabled(): boolean {
+  return process.env.SPEKO_NAVAI_FLUSH_ENDPOINT === 'true';
+}
+
+/**
  * Long-lived streaming STT over the Speko proxy WebSocket. LiveKit calls
  * `stream()` once per session and keeps the returned `SpeechStream` for the
  * whole call, pushing every captured `AudioFrame` into `this.input`. So this
@@ -520,8 +530,16 @@ export class SpekoSpeechStream extends stt.SpeechStream {
             }
             const value = result.value;
             if (value === stt.SpeechStream.FLUSH_SENTINEL) {
-              // The Speko proxy flushes on its own cadence; a flush sentinel is
-              // an utterance boundary hint with no wire frame. Nothing to send.
+              // Utterance boundary from the framework's turn detector. By default
+              // there's no wire frame for it. When the flush-endpoint path is on
+              // (SPEKO_NAVAI_FLUSH_ENDPOINT), forward it as a {type:'flush'} frame
+              // so a provider that needs client-driven endpointing (navai) can
+              // finalize on this semantic turn signal instead of a second energy
+              // VAD. The server ignores it unless the stream is navai-pinned, so
+              // this is safe for every other provider; off by default → unchanged.
+              if (flushEndpointEnabled() && ws.readyState === WS_OPEN) {
+                ws.send(JSON.stringify({ type: 'flush' }));
+              }
               continue;
             }
             const frame = value;

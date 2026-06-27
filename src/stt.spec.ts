@@ -491,3 +491,116 @@ describe('SpekoSpeechStream reconnect resilience', () => {
     expect(attempts).toBeLessThanOrEqual(4);
   });
 });
+
+describe('SpekoSpeechStream flush-endpoint (SPEKO_NAVAI_FLUSH_ENDPOINT)', () => {
+  const base = { language: 'en' };
+  const fastReconnect = {
+    baseDelayMs: 1,
+    maxDelayMs: 2,
+    maxConsecutive: 2,
+    healthyMs: 1_000_000,
+    openTimeoutMs: 50,
+  };
+
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    initializeLogger({ pretty: false, level: 'fatal' });
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+    delete process.env.SPEKO_NAVAI_FLUSH_ENDPOINT;
+  });
+
+  function streamingStt() {
+    const { speko } = makeFakeSpeko({
+      text: '',
+      provider: 'navai',
+      model: 'navai-uz',
+      confidence: 1,
+      failoverCount: 0,
+      scoresRunId: null,
+    });
+    return new SpekoSTT({
+      speko,
+      intent: base,
+      streaming: true,
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+    });
+  }
+
+  // A fake socket that opens on the next tick and captures TEXT frames sent.
+  function openingWsFactory(sent: string[]): WebSocketFactory {
+    return () => {
+      const ws = {
+        binaryType: 'blob',
+        readyState: 0,
+        send: (d: unknown) => {
+          if (typeof d === 'string') sent.push(d);
+        },
+        close: () => {},
+        onopen: null as ((ev?: unknown) => void) | null,
+        onmessage: null as ((ev: { data: unknown }) => void) | null,
+        onerror: null as ((ev?: unknown) => void) | null,
+        onclose: null as ((ev: { code: number; reason?: string }) => void) | null,
+      };
+      setTimeout(() => {
+        ws.readyState = 1;
+        ws.onopen?.();
+      }, 0);
+      return ws as unknown as WebSocket;
+    };
+  }
+
+  function makeStream(sent: string[]) {
+    return new SpekoSpeechStream(streamingStt(), {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      createWebSocket: openingWsFactory(sent),
+      reconnect: fastReconnect,
+    });
+  }
+
+  const hasFrame = (sent: string[], type: string) =>
+    sent.some((s) => {
+      try {
+        return (JSON.parse(s) as { type?: string }).type === type;
+      } catch {
+        return false;
+      }
+    });
+
+  it('forwards a flush as {type:"flush"} when the flag is on', async () => {
+    process.env.SPEKO_NAVAI_FLUSH_ENDPOINT = 'true';
+    const sent: string[] = [];
+    const stream = makeStream(sent);
+    await vi.waitFor(() => expect(hasFrame(sent, 'config')).toBe(true), {
+      timeout: 1000,
+      interval: 5,
+    });
+    stream.flush(); // enqueues the framework's FLUSH_SENTINEL
+    await vi.waitFor(() => expect(hasFrame(sent, 'flush')).toBe(true), {
+      timeout: 1000,
+      interval: 5,
+    });
+    stream.close();
+  });
+
+  it('does NOT send a flush frame when the flag is off (unchanged behavior)', async () => {
+    delete process.env.SPEKO_NAVAI_FLUSH_ENDPOINT;
+    const sent: string[] = [];
+    const stream = makeStream(sent);
+    await vi.waitFor(() => expect(hasFrame(sent, 'config')).toBe(true), {
+      timeout: 1000,
+      interval: 5,
+    });
+    stream.flush();
+    await new Promise((r) => setTimeout(r, 60)); // let pumpAudio drain the sentinel
+    expect(hasFrame(sent, 'flush')).toBe(false);
+    stream.close();
+  });
+});
