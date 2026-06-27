@@ -67,7 +67,12 @@ export class RegisteredToolsLoader {
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
     try {
-      return await speko.agents.tools.listChatTools(agentId, controller.signal);
+      // `available: true` → the server omits integration tools whose backing
+      // installation is disconnected/missing, so the model is never offered a
+      // tool that would fail mid-call.
+      return await speko.agents.tools.listChatTools(agentId, controller.signal, {
+        available: true,
+      });
     } catch (err) {
       this.#options.onError?.(
         err instanceof Error
