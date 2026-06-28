@@ -18,6 +18,14 @@ export interface SpekoSTTOptions {
   speko: Speko;
   /** Routing hint sent with every transcription. */
   intent: Intent;
+  /**
+   * Optional Speko voice session id. Forwarded with every transcription for
+   * usage attribution, and used to tag the streaming-STT log lines so a given
+   * call's reconnect / give-up activity can be bucketed in aggregated logs
+   * (SPE-121 — before this a `[speko.SpeechStream]` line carried no call
+   * identity, so a 1011 storm couldn't be attributed to a session).
+   */
+  sessionId?: string;
   /** Optional allow-list constraints. */
   constraints?: PipelineConstraints;
   /**
@@ -66,13 +74,6 @@ export interface SpekoSTTOptions {
    * single known word-emitter; ad-hoc construction leaves it false (safe).
    */
   alignedTranscript?: boolean;
-  /**
-   * Optional session id, used purely to tag the streaming-STT log lines so a
-   * given call's reconnect / give-up activity can be bucketed in aggregated
-   * logs (SPE-121 — before this, a `[speko.SpeechStream]` line carried no
-   * call identity, so a 1011 storm couldn't be attributed to a session).
-   */
-  sessionId?: string;
 }
 
 /**
@@ -97,12 +98,12 @@ export class SpekoSTT extends stt.STT {
   label = 'speko.STT';
   readonly #speko: Speko;
   readonly #intent: Intent;
+  readonly #sessionId: string | undefined;
   readonly #constraints: PipelineConstraints | undefined;
   readonly #keywords: readonly string[] | undefined;
   readonly #streaming: boolean;
   readonly #baseUrl: string | undefined;
   readonly #apiKey: string | undefined;
-  readonly #sessionId: string | undefined;
 
   constructor(options: SpekoSTTOptions) {
     const streaming = options.streaming ?? false;
@@ -130,12 +131,12 @@ export class SpekoSTT extends stt.STT {
     }
     this.#speko = options.speko;
     this.#intent = options.intent;
+    this.#sessionId = options.sessionId;
     this.#constraints = options.constraints;
     this.#keywords = options.keywords && options.keywords.length > 0 ? options.keywords : undefined;
     this.#streaming = streaming;
     this.#baseUrl = options.baseUrl;
     this.#apiKey = options.apiKey;
-    this.#sessionId = options.sessionId;
   }
 
   override get provider(): string {
@@ -162,6 +163,7 @@ export class SpekoSTT extends stt.STT {
             optimizeFor: this.#intent.optimizeFor,
           }),
           contentType: 'audio/wav',
+          ...(this.#sessionId !== undefined && { sessionId: this.#sessionId }),
           ...(this.#constraints !== undefined && { constraints: this.#constraints }),
           ...(this.#keywords !== undefined && { keywords: this.#keywords }),
         },
@@ -209,9 +211,9 @@ export class SpekoSTT extends stt.STT {
       baseUrl: this.#baseUrl,
       apiKey: this.#apiKey,
       intent: this.#intent,
+      sessionId: this.#sessionId,
       constraints: this.#constraints,
       keywords: this.#keywords,
-      ...(this.#sessionId !== undefined && { sessionId: this.#sessionId }),
       ...(options?.connOptions ? { connOptions: options.connOptions } : {}),
     });
   }
@@ -223,10 +225,10 @@ interface SpekoSpeechStreamOptions {
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly intent: Intent;
+  /** Session id for usage attribution + log tagging (SPE-121 observability). */
+  readonly sessionId?: string;
   readonly constraints: PipelineConstraints | undefined;
   readonly keywords: readonly string[] | undefined;
-  /** Session id for log tagging (SPE-121 observability). */
-  readonly sessionId?: string;
   readonly connOptions?: APIConnectOptions;
   /**
    * Reconnect policy override. Production uses {@link DEFAULT_RECONNECT_POLICY};
@@ -535,7 +537,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     progress: { audioPumped: boolean },
   ): Promise<boolean> {
     const url = toWsUrl(this.#opts.baseUrl);
-    const ws = this.#createWebSocket(url, { Authorization: `Bearer ${this.#opts.apiKey}` });
+    const ws = this.#createWebSocket(url, this.#webSocketHeaders());
     ws.binaryType = 'arraybuffer';
 
     return new Promise<boolean>((resolve, reject) => {
@@ -737,6 +739,14 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       }),
       ...(this.#opts.constraints !== undefined && { constraints: this.#opts.constraints }),
       ...(this.#opts.keywords !== undefined && { keywords: this.#opts.keywords }),
+    };
+  }
+
+  #webSocketHeaders(): Record<string, string> {
+    const trimmedSessionId = this.#opts.sessionId?.trim();
+    return {
+      Authorization: `Bearer ${this.#opts.apiKey}`,
+      ...(trimmedSessionId ? { 'x-session-id': trimmedSessionId } : {}),
     };
   }
 

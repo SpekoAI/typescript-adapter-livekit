@@ -23,6 +23,8 @@ const NUM_CHANNELS = 1;
 export interface SpekoTTSOptions {
   speko: Speko;
   intent: Intent;
+  /** Optional Speko voice session id forwarded for usage attribution. */
+  sessionId?: string;
   /** Voice id override forwarded to the Speko proxy. */
   voice?: string;
   /** Forwarded speech speed override. */
@@ -62,6 +64,7 @@ export class SpekoTTS extends tts.TTS {
   label = 'speko.TTS';
   readonly #speko: Speko;
   readonly #intent: Intent;
+  readonly #sessionId: string | undefined;
   readonly #voice?: string;
   readonly #speed?: number;
   readonly #instructions?: string;
@@ -74,6 +77,7 @@ export class SpekoTTS extends tts.TTS {
     super(sampleRate, NUM_CHANNELS, { streaming: false });
     this.#speko = options.speko;
     this.#intent = options.intent;
+    this.#sessionId = options.sessionId;
     this.#voice = options.voice;
     this.#speed = options.speed;
     this.#instructions = options.instructions;
@@ -99,6 +103,7 @@ export class SpekoTTS extends tts.TTS {
       tts: this,
       speko: this.#speko,
       intent: this.#intent,
+      sessionId: this.#sessionId,
       voice: this.#voice,
       speed: this.#speed,
       instructions: this.#instructions,
@@ -124,6 +129,7 @@ interface SpekoTTSChunkedStreamArgs {
   tts: SpekoTTS;
   speko: Speko;
   intent: Intent;
+  sessionId?: string;
   voice?: string;
   speed?: number;
   instructions?: string;
@@ -137,6 +143,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
   label = 'speko.TTSChunkedStream';
   readonly #speko: Speko;
   readonly #intent: Intent;
+  readonly #sessionId: string | undefined;
   readonly #voice?: string;
   readonly #speed?: number;
   readonly #instructions?: string;
@@ -147,6 +154,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
     super(args.text, args.tts, args.connOptions, args.abortSignal);
     this.#speko = args.speko;
     this.#intent = args.intent;
+    this.#sessionId = args.sessionId;
     this.#voice = args.voice;
     this.#speed = args.speed;
     this.#instructions = args.instructions;
@@ -210,6 +218,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
             optimizeFor: this.#intent.optimizeFor,
           }),
           ...(this.#voice !== undefined && { voice: this.#voice }),
+          ...(this.#sessionId !== undefined && { sessionId: this.#sessionId }),
           ...(this.#speed !== undefined && { speed: this.#speed }),
           ...(this.#instructions !== undefined && { instructions: this.#instructions }),
           ...(this.#constraints !== undefined && { constraints: this.#constraints }),

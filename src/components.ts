@@ -21,7 +21,7 @@ export interface CreateSpekoComponentsOptions {
   speko: Speko;
   /** Routing hint used for every proxy call. */
   intent: Intent;
-  /** Active Speko voice session id, forwarded to server-executed tools. */
+  /** Active Speko voice session id, forwarded to proxy calls for usage attribution. */
   sessionId?: string;
   /**
    * VAD instance used to segment user audio into utterances before calling
@@ -209,6 +209,7 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
       instructions: options.ttsOptions.instructions,
     }),
     ...(options.constraints !== undefined && { constraints: options.constraints }),
+    ...(options.sessionId !== undefined && { sessionId: options.sessionId }),
   };
 
   const spekoSTT = new SpekoSTT(sttOptions);
