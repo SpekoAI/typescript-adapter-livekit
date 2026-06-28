@@ -351,10 +351,11 @@ describe('SpekoSpeechStream reconnect resilience', () => {
     const errors: { type: string; recoverable: boolean; error: Error }[] = [];
     sttImpl.on('error', (e) => errors.push(e));
 
-    // Every socket drops before it opens → every attempt fails → exhaustion.
+    // Every socket drops before it opens with a TRANSIENT code (1006 abnormal) →
+    // every attempt is reconnectable → the consecutive budget exhausts.
     const createWebSocket: WebSocketFactory = () => {
       const ws = fakeWs();
-      setTimeout(() => ws.onclose?.({ code: 4401 }), 0);
+      setTimeout(() => ws.onclose?.({ code: 1006 }), 0);
       return ws as unknown as WebSocket;
     };
 
@@ -374,7 +375,87 @@ describe('SpekoSpeechStream reconnect resilience', () => {
     });
     expect(errors[0]?.type).toBe('stt_error');
     expect(errors[0]?.recoverable).toBe(false);
-    expect(errors[0]?.error.message).toMatch(/permanently lost/);
+    expect(errors[0]?.error.message).toMatch(/permanently lost \(exhausted\)/);
+    stream.close();
+  });
+
+  it('gives up IMMEDIATELY on a permanent close code (4401 auth) without burning the reconnect budget', async () => {
+    const sttImpl = makeStreamingStt();
+    const errors: { type: string; recoverable: boolean; error: Error }[] = [];
+    sttImpl.on('error', (e) => errors.push(e));
+
+    // 4401 = unauthorized (stale/revoked key). A retry can NEVER recover, so the
+    // stream must fail fast — not reconnect 5x (~10-15s of caller-facing dead air)
+    // before the inevitable give-up.
+    let attempts = 0;
+    const createWebSocket: WebSocketFactory = () => {
+      attempts += 1;
+      const ws = fakeWs();
+      setTimeout(() => ws.onclose?.({ code: 4401 }), 0);
+      return ws as unknown as WebSocket;
+    };
+
+    const stream = new SpekoSpeechStream(sttImpl, {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      createWebSocket,
+      reconnect: { ...fastReconnect, maxConsecutive: 5 },
+    });
+
+    await vi.waitFor(() => expect(errors.length).toBeGreaterThan(0), {
+      timeout: 3000,
+      interval: 5,
+    });
+    expect(errors[0]?.recoverable).toBe(false);
+    expect(errors[0]?.error.message).toMatch(/permanently lost \(permanent\)/);
+    // The whole point: ONE connection attempt, no wasted reconnects on a dead key.
+    expect(attempts).toBe(1);
+    stream.close();
+  });
+
+  it('gives up via the lifetime cap when a flap never trips the consecutive budget (#13)', async () => {
+    const sttImpl = makeStreamingStt();
+    const errors: { type: string; recoverable: boolean; error: Error }[] = [];
+    sttImpl.on('error', (e) => errors.push(e));
+
+    // maxConsecutive huge so it never trips; only the lifetime cap can stop an
+    // endless transient flap.
+    let attempts = 0;
+    const createWebSocket: WebSocketFactory = () => {
+      attempts += 1;
+      const ws = fakeWs();
+      setTimeout(() => ws.onclose?.({ code: 1006 }), 0);
+      return ws as unknown as WebSocket;
+    };
+
+    const stream = new SpekoSpeechStream(sttImpl, {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      createWebSocket,
+      reconnect: {
+        baseDelayMs: 1,
+        maxDelayMs: 2,
+        maxConsecutive: 1000,
+        healthyMs: 0,
+        openTimeoutMs: 50,
+        maxLifetime: 3,
+      },
+    });
+
+    await vi.waitFor(() => expect(errors.length).toBeGreaterThan(0), {
+      timeout: 3000,
+      interval: 5,
+    });
+    expect(errors[0]?.recoverable).toBe(false);
+    expect(errors[0]?.error.message).toMatch(/permanently lost \(flapping\)/);
+    // initial attempt + maxLifetime(3) reconnects, then it gives up.
+    expect(attempts).toBeLessThanOrEqual(5);
     stream.close();
   });
 

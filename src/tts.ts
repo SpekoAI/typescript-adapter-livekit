@@ -1,4 +1,4 @@
-import { type APIConnectOptions, AudioByteStream, log, tts } from '@livekit/agents';
+import { type APIConnectOptions, APIError, AudioByteStream, log, tts } from '@livekit/agents';
 import type { AudioFrame } from '@livekit/rtc-node';
 import type {
   PipelineConstraints,
@@ -8,6 +8,7 @@ import type {
 } from '@spekoai/sdk';
 
 import { parseWav, pcmSampleRateFromContentType } from './audio.js';
+import { isAbortError, toFrameworkApiError } from './errors.js';
 import { type Intent, validateIntent } from './intent.js';
 
 /**
@@ -154,6 +155,27 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
   }
 
   protected async run(): Promise<void> {
+    try {
+      await this.#synthesize();
+    } catch (err) {
+      // A barge-in aborts the in-flight synthesis mid-stream — that is a normal
+      // user action, not a provider fault. Returning (not throwing) prevents the
+      // framework from emitting a spurious recoverable:false TTS error that,
+      // after a few back-to-back interruptions, would exhaust the session's
+      // error budget and close the live call.
+      if (this.abortSignal?.aborted || isAbortError(err)) {
+        log().info('[SpekoTTS] synthesize:aborted (barge-in)');
+        return;
+      }
+      // Otherwise hand the framework a classified APIError so its maxRetry loop
+      // runs: transient faults (5xx/429/empty-audio/connection-drop) retry, and
+      // only a genuinely permanent fault surfaces recoverable:false. A bare
+      // Error here would skip retries and close the session on the first blip.
+      throw toFrameworkApiError(err);
+    }
+  }
+
+  async #synthesize(): Promise<void> {
     // Diagnostic logging is intentionally verbose around the synthesize
     // boundary because the LiveKit Agents framework emits "TTS stream
     // stalled after producing audio, forcing close" with zero context
@@ -199,6 +221,9 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
         this.abortSignal,
       );
     } catch (err) {
+      // Let the run() wrapper swallow a barge-in abort silently — logging it as
+      // an error would be misleading noise (a normal interruption, not a fault).
+      if (this.abortSignal?.aborted || isAbortError(err)) throw err;
       logger.error(
         {
           requestId,
@@ -248,11 +273,15 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
         },
         '[SpekoTTS] synthesize:sample-rate-mismatch',
       );
-      throw new Error(
+      // Deterministic routing misconfig — retrying the same request hits the same
+      // provider at the same wrong rate. Non-retryable so the framework fails fast
+      // rather than burning maxRetry attempts before the inevitable close.
+      throw new APIError(
         `SpekoTTS: provider returned audio at ${sampleRate} Hz but the TTS was ` +
           `configured for ${this.#expectedSampleRate} Hz. Either set ` +
           `\`sampleRate: ${sampleRate}\` on SpekoTTS or pin the Speko router to a ` +
           `provider that matches the expected rate.`,
+        { retryable: false },
       );
     }
 
@@ -262,7 +291,9 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
 
     if (frames.length === 0) {
       logger.error({ requestId }, '[SpekoTTS] synthesize:empty-frames');
-      throw new Error('SpekoTTS: provider returned empty audio');
+      // Empty audio is a transient provider glitch — retryable so the framework
+      // re-requests (and the router can fail over) instead of closing the call.
+      throw new APIError('SpekoTTS: provider returned empty audio', { retryable: true });
     }
 
     logger.info(
@@ -295,9 +326,17 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
       this.#expectedSampleRate,
     );
     if (sampleRate !== this.#expectedSampleRate) {
-      throw new Error(
+      // Log a greppable breadcrumb BEFORE throwing — on the streaming path the
+      // framework wraps this error and (historically) rendered it as an empty
+      // object, so without this line the cause was invisible in worker logs.
+      logger.error(
+        { requestId, actualSampleRate: sampleRate, expectedSampleRate: this.#expectedSampleRate },
+        '[SpekoTTS] synthesize:sample-rate-mismatch (streaming)',
+      );
+      throw new APIError(
         `SpekoTTS: provider returned audio at ${sampleRate} Hz but the TTS was ` +
           `configured for ${this.#expectedSampleRate} Hz.`,
+        { retryable: false },
       );
     }
 
@@ -350,7 +389,9 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
 
     if (pushed === 0) {
       logger.error({ requestId }, '[SpekoTTS] synthesize:empty-frames');
-      throw new Error('SpekoTTS: provider returned empty audio');
+      // Empty audio is a transient provider glitch — retryable so the framework
+      // re-requests (and the router can fail over) instead of closing the call.
+      throw new APIError('SpekoTTS: provider returned empty audio', { retryable: true });
     }
 
     logger.info(

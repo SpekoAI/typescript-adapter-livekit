@@ -10,6 +10,7 @@ import type { AudioFrame } from '@livekit/rtc-node';
 import type { PipelineConstraints, Speko } from '@spekoai/sdk';
 
 import { framesToWav } from './audio.js';
+import { isAbortError, toFrameworkApiError } from './errors.js';
 import { type Intent, validateIntent } from './intent.js';
 
 export interface SpekoSTTOptions {
@@ -150,20 +151,31 @@ export class SpekoSTT extends stt.STT {
     abortSignal?: AbortSignal,
   ): Promise<stt.SpeechEvent> {
     const wav = framesToWav(frame);
-    const result = await this.#speko.transcribe(
-      wav,
-      {
-        language: this.#intent.language,
-        ...(this.#intent.region !== undefined && { region: this.#intent.region }),
-        ...(this.#intent.optimizeFor !== undefined && {
-          optimizeFor: this.#intent.optimizeFor,
-        }),
-        contentType: 'audio/wav',
-        ...(this.#constraints !== undefined && { constraints: this.#constraints }),
-        ...(this.#keywords !== undefined && { keywords: this.#keywords }),
-      },
-      abortSignal,
-    );
+    let result;
+    try {
+      result = await this.#speko.transcribe(
+        wav,
+        {
+          language: this.#intent.language,
+          ...(this.#intent.region !== undefined && { region: this.#intent.region }),
+          ...(this.#intent.optimizeFor !== undefined && {
+            optimizeFor: this.#intent.optimizeFor,
+          }),
+          contentType: 'audio/wav',
+          ...(this.#constraints !== undefined && { constraints: this.#constraints }),
+          ...(this.#keywords !== undefined && { keywords: this.#keywords }),
+        },
+        abortSignal,
+      );
+    } catch (err) {
+      // An abort (barge-in) propagates unchanged for the framework to handle.
+      // Any other fault becomes a classified APIError so the batch STT retry
+      // loop engages (a transient transcribe blip retries instead of being
+      // reported as recoverable:false — which for STT closes the call instantly,
+      // since the AgentSession gives STT no error budget).
+      if (isAbortError(err) || abortSignal?.aborted) throw err;
+      throw toFrameworkApiError(err);
+    }
 
     return {
       type: stt.SpeechEventType.FINAL_TRANSCRIPT,
@@ -281,6 +293,15 @@ export interface ReconnectPolicy {
   healthyMs: number;
   /** If the socket never opens within this, fail it so a half-open socket can't hang run(). */
   openTimeoutMs: number;
+  /**
+   * Absolute cap on TOTAL reconnects across the whole call, independent of the
+   * healthy-stretch reset. The consecutive-failure budget resets after any
+   * healthy+audio connection, so a socket that recycles every ~11s would
+   * otherwise reconnect FOREVER — deaf for a window each cycle — and never give
+   * up. This bounds the lifetime churn: a chronic flap escalates (gives up)
+   * instead of silently degrading the call forever.
+   */
+  maxLifetime: number;
 }
 
 export const DEFAULT_RECONNECT_POLICY: ReconnectPolicy = {
@@ -289,7 +310,33 @@ export const DEFAULT_RECONNECT_POLICY: ReconnectPolicy = {
   maxConsecutive: 5,
   healthyMs: 10_000,
   openTimeoutMs: 10_000,
+  maxLifetime: 50,
 };
+
+/**
+ * WebSocket close codes that signal a PERMANENT failure — reconnecting can
+ * never recover, so burning the reconnect budget on them just adds ~10-15s of
+ * caller-facing dead air before the inevitable give-up. 4401 = unauthorized
+ * (stale/revoked key), 4400 = invalid config, 1008 = policy violation. Transient
+ * codes (1006 abnormal, 1011 server error) are NOT here — those reconnect.
+ */
+const PERMANENT_WS_CLOSE_CODES = new Set([4401, 4400, 1008]);
+
+/** A reconnect failure the run loop must NOT retry (permanent close code). */
+class PermanentStreamError extends Error {
+  readonly permanent = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'PermanentStreamError';
+  }
+}
+
+function isPermanentStreamError(err: unknown): boolean {
+  return (
+    err instanceof PermanentStreamError ||
+    (typeof err === 'object' && err !== null && (err as { permanent?: unknown }).permanent === true)
+  );
+}
 
 /** The `stt_error` payload shape, derived from the exported callback type. */
 type SttErrorEvent = Parameters<stt.STTCallbacks['error']>[0];
@@ -396,6 +443,10 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     const inputIterator = this.input[Symbol.asyncIterator]();
     let inputDone = false;
     let consecutiveFailures = 0;
+    // Total reconnects across the whole call — the lifetime cap (#13) so a
+    // connection that flaps every ~healthyMs can't reset the consecutive budget
+    // forever and churn for the entire call.
+    let totalReconnects = 0;
     // Whether ANY connection in this stream's life carried real audio. Surfaced
     // in the give-up log so a never-heard stream (leaked/duplicate, or an
     // unsubscribed caller track) is distinguishable from a genuinely failing
@@ -416,6 +467,24 @@ export class SpekoSpeechStream extends stt.SpeechStream {
         this.#emitError(error);
         if (this.closed || inputDone) break;
 
+        // A permanent close (auth/config/policy) will never recover. Giving it
+        // the full reconnect budget just burns ~10-15s of caller-facing dead air
+        // before the inevitable give-up — fail fast with a clear diagnostic (#11).
+        if (isPermanentStreamError(error)) {
+          this.#giveUp(error, everPumpedAudio, 'permanent');
+          break;
+        }
+
+        // Lifetime cap (#13): a connection that recycles every ~healthyMs would
+        // reset the consecutive budget on every survival and reconnect for the
+        // whole call (deaf for a window each cycle). Bound TOTAL reconnects so a
+        // chronic flap escalates instead of churning silently forever.
+        totalReconnects += 1;
+        if (totalReconnects > this.#policy.maxLifetime) {
+          this.#giveUp(error, everPumpedAudio, 'flapping');
+          break;
+        }
+
         // Reset the budget ONLY when the dropped connection both stayed up a
         // healthy stretch AND actually carried audio. A connection that opened
         // but pumped ZERO audio — a leaked/duplicate stream, or a call whose
@@ -430,12 +499,14 @@ export class SpekoSpeechStream extends stt.SpeechStream {
         }
         consecutiveFailures += 1;
         if (consecutiveFailures > this.#policy.maxConsecutive) {
-          this.#giveUp(error, everPumpedAudio);
+          this.#giveUp(error, everPumpedAudio, 'exhausted');
           break;
         }
         const backoffMs = reconnectBackoffMs(consecutiveFailures, this.#policy);
         this.#log(
-          `reconnecting (attempt ${consecutiveFailures}/${this.#policy.maxConsecutive}, audioReceived=${everPumpedAudio}) in ${backoffMs}ms after: ${error.message}`,
+          `[phase=retrying] reconnecting (attempt ${consecutiveFailures}/${this.#policy.maxConsecutive}, ` +
+            `total=${totalReconnects}/${this.#policy.maxLifetime}, audioReceived=${everPumpedAudio}) ` +
+            `in ${backoffMs}ms after: ${error.message}`,
         );
         await this.#sleep(backoffMs);
       }
@@ -589,7 +660,14 @@ export class SpekoSpeechStream extends stt.SpeechStream {
           this.#emitTranscript(frame as ServerTranscriptFrame);
         } else if (kind === 'error') {
           const message = (frame as { message?: unknown }).message;
-          this.#log(`server error frame: ${typeof message === 'string' ? message : 'unknown'}`);
+          // Log the structured failure code alongside the message so a
+          // stale-BYOK / quota / 1011 death is attributable to a class rather
+          // than just a free-text string (#12).
+          const code = (frame as { code?: unknown }).code;
+          this.#log(
+            `[phase=retrying] server error frame: code=${typeof code === 'string' ? code : 'unknown'} ` +
+              `message=${typeof message === 'string' ? message : 'unknown'}`,
+          );
         } else if (kind === 'end') {
           // Server finished. If our input is also done, this is a clean end.
           if (inputFinished) {
@@ -599,6 +677,12 @@ export class SpekoSpeechStream extends stt.SpeechStream {
               // ignore
             }
             settle(true);
+          } else {
+            // Server ended the stream mid-call while we still have audio to send
+            // — the upstream provider dropped us. Treat it as a reconnectable
+            // failure rather than ignoring it (which parked run() on a half-dead
+            // socket, deaf until a later 1011 finally fired) (#14).
+            fail(new Error('Speko streaming STT server ended the stream mid-call'));
           }
         }
         // `ready` is informational; nothing to do.
@@ -615,6 +699,18 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       };
 
       ws.onclose = (evt: CloseEvent) => {
+        // A permanent close (auth/config/policy) can never recover — surface it
+        // as a non-reconnectable failure so the run loop gives up immediately
+        // instead of burning the reconnect budget on a guaranteed-dead endpoint
+        // (#11). Checked first so it applies even on a close-before-open.
+        if (PERMANENT_WS_CLOSE_CODES.has(evt.code)) {
+          fail(
+            new PermanentStreamError(
+              `Speko streaming STT WebSocket closed permanently (code ${evt.code})`,
+            ),
+          );
+          return;
+        }
         if (!pumping) {
           // Closed before we ever opened/pumped — reconnectable.
           fail(new Error(`Speko streaming STT WebSocket closed before open (code ${evt.code})`));
@@ -695,16 +791,17 @@ export class SpekoSpeechStream extends stt.SpeechStream {
    * recoverable:false error to the AgentSession so the call doesn't just go
    * silently deaf — the session's error handler sees a real STT error event.
    */
-  #giveUp(error: Error, audioReceived: boolean): void {
+  #giveUp(
+    error: Error,
+    audioReceived: boolean,
+    reason: 'exhausted' | 'permanent' | 'flapping' = 'exhausted',
+  ): void {
     this.#log(
-      `giving up after ${this.#policy.maxConsecutive} consecutive reconnect attempts ` +
-        `(audioReceived=${audioReceived}) — the live session will stop receiving transcripts ` +
-        `(last error: ${error.message})`,
+      `[phase=fatal] giving up (reason=${reason}, audioReceived=${audioReceived}) — the live ` +
+        `session will stop receiving transcripts (last error: ${error.message})`,
     );
     this.#surfaceSessionError(
-      new Error(
-        `Speko streaming STT permanently lost after ${this.#policy.maxConsecutive} reconnect attempts: ${error.message}`,
-      ),
+      new Error(`Speko streaming STT permanently lost (${reason}): ${error.message}`),
     );
   }
 

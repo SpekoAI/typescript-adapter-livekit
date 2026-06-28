@@ -4,6 +4,7 @@ export {
   createSpekoComponents,
   type SpekoComponents,
 } from './components.js';
+export { isAbortError, toFrameworkApiError } from './errors.js';
 export type { Intent, OptimizeFor } from './intent.js';
 export { validateIntent } from './intent.js';
 export { chatContextToSpeko, SpekoAdapterError, SpekoLLM, type SpekoLLMOptions } from './llm.js';

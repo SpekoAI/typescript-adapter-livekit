@@ -7,6 +7,7 @@ import type {
   ChatMessage as SpekoChatMessage,
 } from '@spekoai/sdk';
 
+import { isAbortError, toFrameworkApiError } from './errors.js';
 import { type Intent, validateIntent } from './intent.js';
 import { mergeTools, RegisteredToolsLoader } from './registered-tools.js';
 
@@ -186,6 +187,36 @@ class SpekoLLMStream extends llm.LLMStream {
   }
 
   protected async run(): Promise<void> {
+    try {
+      await this.#complete();
+    } catch (err) {
+      // A VAD/turn-commit abort is normal mid-utterance: the framework calls
+      // abortController.abort() when it detects new user speech, cancelling the
+      // in-flight /v1/complete. Returning cleanly lets the next turn proceed.
+      if (this.abortController.signal.aborted || isAbortError(err)) {
+        if (isAbortError(err)) {
+          log().info('[SpekoLLM] complete:aborted (barge-in)');
+        } else {
+          // Aborted, but a NON-abort fault surfaced during teardown. Don't
+          // rethrow (the turn is already cancelled) but don't hide it either —
+          // a genuine fault during barge-in teardown must stay visible (#20).
+          log().warn(
+            { error: err instanceof Error ? err.message : String(err) },
+            '[SpekoLLM] complete:error-during-abort',
+          );
+        }
+        return;
+      }
+      // Otherwise hand the framework a classified APIError so its maxRetry loop
+      // runs: transient gateway faults (429/5xx/STREAM_ENDED/EMPTY_COMPLETION)
+      // re-issue the turn (the router can fail over); only a permanent fault
+      // (401 auth, INVALID_CONTEXT) surfaces recoverable:false. A bare Error
+      // here would skip retries and close the session on the first blip.
+      throw toFrameworkApiError(err);
+    }
+  }
+
+  async #complete(): Promise<void> {
     // Diagnostic logging mirrors SpekoTTS: the LiveKit framework consumes
     // an LLMStream silently if `run()` returns without ever calling
     // `queue.put()`, so without these logs the symptom is a session that
@@ -284,24 +315,19 @@ class SpekoLLMStream extends llm.LLMStream {
         }
       }
     } catch (err) {
-      // VAD-triggered abort is normal mid-utterance: the framework calls
-      // `abortController.abort()` when it detects new user speech, which
-      // cancels the in-flight /v1/complete request. Returning cleanly
-      // lets the session continue with the next turn. Without this catch,
-      // the AbortError propagates as a fatal `llm_error` and the entire
-      // AgentSession closes.
-      if (this.abortController.signal.aborted) {
-        logger.info({ requestId, elapsedMs: Date.now() - t0 }, '[SpekoLLM] complete:aborted');
-        return;
+      // Log only genuine faults here (with requestId/elapsed context); the
+      // run() wrapper owns abort handling (clean return) and fault
+      // classification (wrap into a retryable/permanent APIError).
+      if (!(this.abortController.signal.aborted || isAbortError(err))) {
+        logger.error(
+          {
+            requestId,
+            elapsedMs: Date.now() - t0,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          '[SpekoLLM] complete:error',
+        );
       }
-      logger.error(
-        {
-          requestId,
-          elapsedMs: Date.now() - t0,
-          error: err instanceof Error ? err.message : String(err),
-        },
-        '[SpekoLLM] complete:error',
-      );
       throw err;
     }
 
