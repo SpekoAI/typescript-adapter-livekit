@@ -162,12 +162,20 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   // that won't deliver would feed the adaptive interruption detector empty
   // arrays. We only know the provider for certain when constraints pin exactly
   // one, and only deepgram/elevenlabs emit word timings through the gateway.
+  // Pins may be bare ("deepgram") or model-qualified ("deepgram:nova-3" — the
+  // dashboard always stores the qualified form), so compare the provider
+  // prefix only.
   const pinnedStt = options.constraints?.allowedProviders?.stt;
+  const pinnedSttProvider =
+    String(pinnedStt?.[0] ?? '')
+      .trim()
+      .toLowerCase()
+      .split(':')[0]!;
   const alignedTranscript =
     sttStreaming &&
     Array.isArray(pinnedStt) &&
     pinnedStt.length === 1 &&
-    WORD_TIMESTAMP_STT_PROVIDERS.has(String(pinnedStt[0]).toLowerCase());
+    WORD_TIMESTAMP_STT_PROVIDERS.has(pinnedSttProvider);
 
   const sttOptions: SpekoSTTOptions = {
     speko: options.speko,

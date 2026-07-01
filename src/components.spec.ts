@@ -89,4 +89,52 @@ describe('createSpekoComponents', () => {
       }),
     ).toThrow(/language/);
   });
+
+  // Word-alignment gate: this is the precondition for LiveKit's adaptive
+  // interruption detector. Dashboard-stored pins are MODEL-QUALIFIED
+  // ("deepgram:nova-3"); a provider-only comparison silently disabled adaptive
+  // for every such agent (the barge-in "conversation collapse" root cause).
+  describe('alignedTranscript gate', () => {
+    function makeStreaming(sttPins: string[] | undefined) {
+      return createSpekoComponents({
+        speko: makeFakeSpeko(),
+        intent: { language: 'en' },
+        vad: makeFakeVAD(),
+        sttBaseUrl: 'https://api.speko.dev',
+        sttApiKey: 'sk-test',
+        ...(sttPins ? { constraints: { allowedProviders: { stt: sttPins } } } : {}),
+      });
+    }
+
+    it.each([
+      ['deepgram'],
+      ['deepgram:nova-3'],
+      ['DeepGram:NOVA-3'],
+      ['elevenlabs:scribe-rt'],
+    ])('declares word alignment for the single word-emitting pin %j (bare or model-qualified)', (pin) => {
+      expect(makeStreaming([pin]).stt.capabilities.alignedTranscript).toBe('word');
+    });
+
+    it.each([
+      [['deepgram:nova-3', 'elevenlabs:scribe-rt']], // multiple pins → provider not guaranteed
+      [['cartesia:ink-whisper']], // pinned, but no word timings through the gateway
+      [[]],
+      [undefined],
+    ])('does NOT declare word alignment for pins %j', (pins) => {
+      expect(makeStreaming(pins as string[] | undefined).stt.capabilities.alignedTranscript).toBe(
+        false,
+      );
+    });
+
+    it('never declares word alignment in batch mode, even with a deepgram pin', () => {
+      const components = createSpekoComponents({
+        speko: makeFakeSpeko(),
+        intent: { language: 'en' },
+        vad: makeFakeVAD(),
+        sttStreaming: false,
+        constraints: { allowedProviders: { stt: ['deepgram:nova-3'] } },
+      });
+      expect(components.stt.capabilities.alignedTranscript).not.toBe('word');
+    });
+  });
 });

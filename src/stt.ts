@@ -104,6 +104,7 @@ export class SpekoSTT extends stt.STT {
   readonly #streaming: boolean;
   readonly #baseUrl: string | undefined;
   readonly #apiKey: string | undefined;
+  readonly #alignedTranscript: boolean;
 
   constructor(options: SpekoSTTOptions) {
     const streaming = options.streaming ?? false;
@@ -137,6 +138,7 @@ export class SpekoSTT extends stt.STT {
     this.#streaming = streaming;
     this.#baseUrl = options.baseUrl;
     this.#apiKey = options.apiKey;
+    this.#alignedTranscript = alignedTranscript === 'word';
   }
 
   override get provider(): string {
@@ -214,6 +216,7 @@ export class SpekoSTT extends stt.STT {
       sessionId: this.#sessionId,
       constraints: this.#constraints,
       keywords: this.#keywords,
+      alignedTranscript: this.#alignedTranscript,
       ...(options?.connOptions ? { connOptions: options.connOptions } : {}),
     });
   }
@@ -229,6 +232,15 @@ interface SpekoSpeechStreamOptions {
   readonly sessionId?: string;
   readonly constraints: PipelineConstraints | undefined;
   readonly keywords: readonly string[] | undefined;
+  /**
+   * Mirror of the parent STT's word-alignment capability. On aligned streams
+   * the config frame requests interim results (the adaptive interruption
+   * detector needs word-timed transcripts DURING overlap, not ~0.5-1s later at
+   * the final), and words-less frames get guarded timings — LiveKit's
+   * `flushHeldTranscripts` treats a `startTime === endTime === 0` alternative
+   * as "no timestamps" and discards the ENTIRE held buffer of user speech.
+   */
+  readonly alignedTranscript?: boolean;
   readonly connOptions?: APIConnectOptions;
   /**
    * Reconnect policy override. Production uses {@link DEFAULT_RECONNECT_POLICY};
@@ -241,6 +253,9 @@ interface SpekoSpeechStreamOptions {
    * no network.
    */
   readonly createWebSocket?: WebSocketFactory;
+  /** Clock override (defaults to `Date.now`). Tests inject a fake to make the
+   * aligned-stream timestamp rebasing deterministic. */
+  readonly now?: () => number;
 }
 
 /** Per-word timing on a transcript frame, in SECONDS. */
@@ -426,6 +441,24 @@ export class SpekoSpeechStream extends stt.SpeechStream {
   readonly #createWebSocket: WebSocketFactory;
   readonly #sessionId: string | undefined;
   #speaking = false;
+  readonly #now: () => number;
+  /**
+   * Session epoch (ms): when this stream was created — the closest observable
+   * to LiveKit's session-scoped input clock (`_inputStartedAt`). All aligned
+   * timestamps are expressed as seconds since this epoch.
+   */
+  readonly #streamEpochMs: number;
+  /**
+   * Session-relative seconds at the CURRENT connection's audio start. Provider
+   * word timings restart at ~0 on every gateway connection, but the reconnect
+   * loop is invisible to LiveKit, whose `audio_recognition` compares timings
+   * against the session-scoped clock — un-rebased post-reconnect timings map
+   * into the deep past of its echo ignore-window, so every held barge-in
+   * transcript would be discarded for the rest of the call. Rebased in
+   * `ws.onopen` for every connection; applied to emitted timings only on
+   * aligned streams (non-aligned emission is unchanged).
+   */
+  #connEpochOffsetS = 0;
 
   constructor(sttImpl: SpekoSTT, opts: SpekoSpeechStreamOptions) {
     super(sttImpl);
@@ -435,6 +468,8 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     this.#policy = { ...DEFAULT_RECONNECT_POLICY, ...(opts.reconnect ?? {}) };
     this.#createWebSocket = opts.createWebSocket ?? defaultCreateWebSocket;
     this.#sessionId = opts.sessionId;
+    this.#now = opts.now ?? Date.now;
+    this.#streamEpochMs = this.#now();
   }
 
   protected async run(): Promise<void> {
@@ -640,6 +675,11 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       ws.onopen = () => {
         opened = true;
         clearTimeout(openTimer);
+        // Rebase the connection clock: this connection's audio (and so the
+        // provider's word timings) starts ~now, this many seconds into the
+        // session. ~0 for the first connection; the elapsed call time after a
+        // transparent reconnect.
+        this.#connEpochOffsetS = (this.#now() - this.#streamEpochMs) / 1000;
         try {
           ws.send(JSON.stringify(this.#configFrame()));
         } catch (err) {
@@ -739,6 +779,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       }),
       ...(this.#opts.constraints !== undefined && { constraints: this.#opts.constraints }),
       ...(this.#opts.keywords !== undefined && { keywords: this.#opts.keywords }),
+      ...(this.#opts.alignedTranscript ? { interimResults: true } : {}),
     };
   }
 
@@ -757,22 +798,57 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     if (!text && !isFinal) return;
     // Map per-word timings into TimedString[] when the gateway forwarded them.
     // LiveKit's adaptive interruption detector aligns these against the audio
-    // clock; SpeechData.startTime/endTime span the whole utterance.
-    const words = frame.words?.length
-      ? frame.words.map((w) =>
+    // clock; SpeechData.startTime/endTime span the whole utterance. On aligned
+    // streams every timing is rebased onto the SESSION clock (provider timings
+    // are connection-relative and restart on reconnect — see #connEpochOffsetS);
+    // non-aligned streams keep the raw provider timings, byte-for-byte.
+    const aligned = this.#opts.alignedTranscript === true;
+    const offsetS = aligned ? this.#connEpochOffsetS : 0;
+    // A word without finite timings would propagate NaN into every framework
+    // comparison — drop it (the gateway wire contract never emits one).
+    const timedWords = frame.words?.filter(
+      (w) => Number.isFinite(w.start) && Number.isFinite(w.end),
+    );
+    const words = timedWords?.length
+      ? timedWords.map((w) =>
           createTimedString({
             text: w.text,
-            startTime: w.start,
-            endTime: w.end,
+            startTime: w.start + offsetS,
+            endTime: w.end + offsetS,
             ...(Number.isFinite(w.confidence) ? { confidence: w.confidence } : {}),
           }),
         )
       : undefined;
+    let startTime = 0;
+    let endTime = 0;
+    if (words?.length) {
+      startTime = words[0]?.startTime ?? 0;
+      endTime = words[words.length - 1]?.endTime ?? 0;
+      // Same 0/0-sentinel insurance as the words-less branch, for the
+      // theoretical zero-duration-word-at-0 + same-millisecond-onopen case.
+      if (aligned) endTime = Math.max(endTime, 0.001);
+    } else if (aligned) {
+      // Words-less frame on a word-aligned stream: Deepgram emits empty finals
+      // during silence; ElevenLabs realtime interims carry text but no words.
+      // LiveKit's flushHeldTranscripts treats a startTime === endTime === 0
+      // alternative as "no timestamps" and drops the ENTIRE held buffer —
+      // every word the user spoke over the agent. An empty frame outside
+      // speech carries no information, so skip it; any other words-less frame
+      // is stamped at the session clock "now" (≈ the end of the audio it
+      // transcribes, one transcription delay late) so it stays orderable and
+      // can never look like pre-playback echo.
+      if (!text && !this.#speaking) return;
+      // Floor at 1ms: a frame landing in the epoch's own millisecond must
+      // still never produce the 0/0 sentinel.
+      const nowS = Math.max((this.#now() - this.#streamEpochMs) / 1000, 0.001);
+      startTime = nowS;
+      endTime = nowS;
+    }
     const speechData: stt.SpeechData = {
       language: this.#language,
       text,
-      startTime: words?.length ? (words[0]?.startTime ?? 0) : 0,
-      endTime: words?.length ? (words[words.length - 1]?.endTime ?? 0) : 0,
+      startTime,
+      endTime,
       confidence: Number.isFinite(frame.confidence) ? frame.confidence : 1,
       ...(words ? { words } : {}),
     };

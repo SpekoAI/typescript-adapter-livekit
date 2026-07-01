@@ -685,3 +685,320 @@ describe('SpekoSpeechStream flush-endpoint (SPEKO_NAVAI_FLUSH_ENDPOINT)', () => 
     stream.close();
   });
 });
+
+// Word-aligned streams feed LiveKit's adaptive interruption detector, which
+// (a) needs interim results so words arrive DURING overlap, and (b) treats a
+// `startTime === endTime === 0` alternative as "no timestamps" and discards
+// the ENTIRE buffer of user speech held during agent playback
+// (audio_recognition flushHeldTranscripts) — so 0/0 must never be emitted on
+// an aligned stream.
+describe('SpekoSpeechStream word-aligned emission', () => {
+  const base = { language: 'en' };
+  const fastReconnect = {
+    baseDelayMs: 1,
+    maxDelayMs: 2,
+    maxConsecutive: 2,
+    healthyMs: 1_000_000,
+    openTimeoutMs: 50,
+  };
+
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    initializeLogger({ pretty: false, level: 'fatal' });
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  function streamingStt() {
+    const { speko } = makeFakeSpeko({
+      text: '',
+      provider: 'deepgram',
+      model: 'nova-3',
+      confidence: 1,
+      failoverCount: 0,
+      scoresRunId: null,
+    });
+    return new SpekoSTT({
+      speko,
+      intent: base,
+      streaming: true,
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+    });
+  }
+
+  // Opens on the next tick, replies `ready`, then delivers the given frames.
+  function frameDeliveringWs(frames: readonly object[], sent: string[]): WebSocketFactory {
+    return () => {
+      const ws = {
+        binaryType: 'blob',
+        readyState: 0,
+        send: (d: unknown) => {
+          if (typeof d === 'string') sent.push(d);
+        },
+        close: () => {},
+        onopen: null as ((ev?: unknown) => void) | null,
+        onmessage: null as ((ev: { data: unknown }) => void) | null,
+        onerror: null as ((ev?: unknown) => void) | null,
+        onclose: null as ((ev: { code: number; reason?: string }) => void) | null,
+      };
+      setTimeout(() => {
+        ws.readyState = 1;
+        ws.onopen?.();
+        ws.onmessage?.({
+          data: JSON.stringify({ type: 'ready', provider: 'deepgram', model: 'nova-3' }),
+        });
+        for (const frame of frames) ws.onmessage?.({ data: JSON.stringify(frame) });
+      }, 0);
+      return ws as unknown as WebSocket;
+    };
+  }
+
+  function makeStream(options: { aligned: boolean; frames: readonly object[]; sent?: string[] }): {
+    stream: SpekoSpeechStream;
+    sent: string[];
+  } {
+    const sent = options.sent ?? [];
+    const stream = new SpekoSpeechStream(streamingStt(), {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      alignedTranscript: options.aligned,
+      createWebSocket: frameDeliveringWs(options.frames, sent),
+      reconnect: fastReconnect,
+      // Frozen clock → connection offset 0 → emitted timings are exactly the
+      // provider's, keeping the assertions below deterministic.
+      now: () => 0,
+    });
+    return { stream, sent };
+  }
+
+  function parseConfigFrame(sent: string[]): Record<string, unknown> | undefined {
+    for (const s of sent) {
+      try {
+        const parsed = JSON.parse(s) as { type?: string };
+        if (parsed.type === 'config') return parsed as Record<string, unknown>;
+      } catch {
+        // binary/audio frames
+      }
+    }
+    return undefined;
+  }
+
+  const wordedFinal = {
+    type: 'transcript',
+    text: 'hello world',
+    isFinal: true,
+    confidence: 0.9,
+    words: [
+      { text: 'hello', start: 1.5, end: 2.0, confidence: 0.9 },
+      { text: 'world', start: 2.0, end: 2.5, confidence: 0.9 },
+    ],
+  };
+  const emptyWordlessFinal = { type: 'transcript', text: '', isFinal: true, confidence: 0 };
+
+  it('requests interim results in the config frame on an aligned stream (and not otherwise)', async () => {
+    const aligned = makeStream({ aligned: true, frames: [] });
+    await vi.waitFor(() => expect(parseConfigFrame(aligned.sent)).toBeDefined(), {
+      timeout: 1000,
+      interval: 5,
+    });
+    expect(parseConfigFrame(aligned.sent)?.interimResults).toBe(true);
+    aligned.stream.close();
+
+    const plain = makeStream({ aligned: false, frames: [] });
+    await vi.waitFor(() => expect(parseConfigFrame(plain.sent)).toBeDefined(), {
+      timeout: 1000,
+      interval: 5,
+    });
+    expect(parseConfigFrame(plain.sent)).not.toHaveProperty('interimResults');
+    plain.stream.close();
+  });
+
+  it('aligned: skips words-less empty finals outside speech (the held-buffer nuke) but still emits real transcripts', async () => {
+    const { stream } = makeStream({
+      aligned: true,
+      frames: [emptyWordlessFinal, wordedFinal],
+    });
+    const got: stt.SpeechEvent[] = [];
+    const reader = (async () => {
+      for await (const ev of stream) got.push(ev);
+    })();
+
+    await vi.waitFor(
+      () => expect(got.some((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT)).toBe(true),
+      { timeout: 3000, interval: 5 },
+    );
+    stream.close();
+    await reader;
+
+    const finals = got.filter((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT);
+    expect(finals).toHaveLength(1); // the empty final was dropped, not emitted as ''
+    expect(finals[0]?.alternatives?.[0]?.text).toBe('hello world');
+    expect(finals[0]?.alternatives?.[0]?.startTime).toBe(1.5);
+    expect(finals[0]?.alternatives?.[0]?.endTime).toBe(2.5);
+    expect(got.filter((e) => e.type === stt.SpeechEventType.START_OF_SPEECH)).toHaveLength(1);
+  });
+
+  it('aligned: stamps words-less non-empty frames at the session clock — never the 0/0 sentinel, even before any worded frame', async () => {
+    // ElevenLabs realtime interims carry text but no words; before this guard
+    // the FIRST such frame of a call was stamped 0/0 (nothing seen yet).
+    const clock = { t: 0 };
+    const sent: string[] = [];
+    const createWebSocket: WebSocketFactory = () => {
+      const ws = {
+        binaryType: 'blob',
+        readyState: 0,
+        send: (d: unknown) => {
+          if (typeof d === 'string') sent.push(d);
+        },
+        close: () => {},
+        onopen: null as ((ev?: unknown) => void) | null,
+        onmessage: null as ((ev: { data: unknown }) => void) | null,
+        onerror: null as ((ev?: unknown) => void) | null,
+        onclose: null as ((ev: { code: number; reason?: string }) => void) | null,
+      };
+      setTimeout(() => {
+        clock.t += 100; // connect latency
+        ws.readyState = 1;
+        ws.onopen?.();
+        ws.onmessage?.({
+          data: JSON.stringify({ type: 'ready', provider: 'elevenlabs', model: 'scribe-rt' }),
+        });
+        clock.t += 5_000; // 5s into the call, user speaks
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: 'transcript',
+            text: 'uh huh',
+            isFinal: true,
+            confidence: 0.5,
+          }),
+        });
+      }, 0);
+      return ws as unknown as WebSocket;
+    };
+    const stream = new SpekoSpeechStream(streamingStt(), {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      alignedTranscript: true,
+      createWebSocket,
+      reconnect: fastReconnect,
+      now: () => clock.t,
+    });
+    const got: stt.SpeechEvent[] = [];
+    const reader = (async () => {
+      for await (const ev of stream) got.push(ev);
+    })();
+
+    await vi.waitFor(
+      () => expect(got.some((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT)).toBe(true),
+      { timeout: 3000, interval: 5 },
+    );
+    stream.close();
+    await reader;
+
+    const wordless = got.find((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT)
+      ?.alternatives?.[0];
+    expect(wordless?.text).toBe('uh huh');
+    // Session-clock stamp (5.1s in), NOT the 0/0 sentinel.
+    expect(wordless?.startTime).toBe(5.1);
+    expect(wordless?.endTime).toBe(5.1);
+  });
+
+  it('aligned: rebases provider word timings onto the session clock across reconnects', async () => {
+    // Provider word clocks restart at ~0 on every gateway connection, but the
+    // reconnect is invisible to LiveKit, whose echo ignore-window is
+    // session-scoped — un-rebased times would map post-reconnect barge-ins
+    // into the deep past and get them discarded.
+    const clock = { t: 0 };
+    let attempt = 0;
+    const createWebSocket: WebSocketFactory = () => {
+      attempt += 1;
+      const ws = {
+        binaryType: 'blob',
+        readyState: 0,
+        send: () => {},
+        close: () => {},
+        onopen: null as ((ev?: unknown) => void) | null,
+        onmessage: null as ((ev: { data: unknown }) => void) | null,
+        onerror: null as ((ev?: unknown) => void) | null,
+        onclose: null as ((ev: { code: number; reason?: string }) => void) | null,
+      };
+      if (attempt === 1) {
+        // First connection dies 1s into the call (transient blip).
+        setTimeout(() => {
+          clock.t = 1_000;
+          ws.onclose?.({ code: 1006 });
+        }, 0);
+      } else {
+        setTimeout(() => {
+          clock.t = 120_000; // reconnected 2 minutes into the session
+          ws.readyState = 1;
+          ws.onopen?.();
+          ws.onmessage?.({
+            data: JSON.stringify({ type: 'ready', provider: 'deepgram', model: 'nova-3' }),
+          });
+          ws.onmessage?.({ data: JSON.stringify(wordedFinal) }); // provider clock restarted: words at 1.5-2.5
+        }, 0);
+      }
+      return ws as unknown as WebSocket;
+    };
+    const stream = new SpekoSpeechStream(streamingStt(), {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      constraints: undefined,
+      keywords: undefined,
+      alignedTranscript: true,
+      createWebSocket,
+      reconnect: { ...fastReconnect, maxConsecutive: 5 },
+      now: () => clock.t,
+    });
+    const got: stt.SpeechEvent[] = [];
+    const reader = (async () => {
+      for await (const ev of stream) got.push(ev);
+    })();
+
+    await vi.waitFor(
+      () => expect(got.some((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT)).toBe(true),
+      { timeout: 3000, interval: 5 },
+    );
+    stream.close();
+    await reader;
+
+    const final = got.find((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT)
+      ?.alternatives?.[0];
+    // 1.5-2.5s on the NEW connection's clock → 121.5-122.5s of session time.
+    expect(final?.startTime).toBe(121.5);
+    expect(final?.endTime).toBe(122.5);
+    expect(final?.words?.[0]?.startTime).toBe(121.5);
+    expect(final?.words?.[1]?.endTime).toBe(122.5);
+  });
+
+  it('non-aligned: keeps the legacy behavior (empty finals emitted with 0/0)', async () => {
+    const { stream } = makeStream({ aligned: false, frames: [emptyWordlessFinal] });
+    const got: stt.SpeechEvent[] = [];
+    const reader = (async () => {
+      for await (const ev of stream) got.push(ev);
+    })();
+
+    await vi.waitFor(
+      () => expect(got.some((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT)).toBe(true),
+      { timeout: 3000, interval: 5 },
+    );
+    stream.close();
+    await reader;
+
+    const final = got.find((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT);
+    expect(final?.alternatives?.[0]?.text).toBe('');
+    expect(final?.alternatives?.[0]?.startTime).toBe(0);
+    expect(final?.alternatives?.[0]?.endTime).toBe(0);
+  });
+});
