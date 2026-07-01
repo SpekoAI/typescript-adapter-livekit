@@ -166,11 +166,10 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   // dashboard always stores the qualified form), so compare the provider
   // prefix only.
   const pinnedStt = options.constraints?.allowedProviders?.stt;
-  const pinnedSttProvider =
-    String(pinnedStt?.[0] ?? '')
-      .trim()
-      .toLowerCase()
-      .split(':')[0]!;
+  const pinnedSttProvider = String(pinnedStt?.[0] ?? '')
+    .trim()
+    .toLowerCase()
+    .split(':')[0]!;
   const alignedTranscript =
     sttStreaming &&
     Array.isArray(pinnedStt) &&
