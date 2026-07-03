@@ -1,7 +1,8 @@
+import { llm } from '@livekit/agents';
 import type { ChatTool, Speko } from '@spekoai/sdk';
 import { describe, expect, it, vi } from 'vitest';
 
-import { mergeTools, RegisteredToolsLoader } from './registered-tools.js';
+import { inlineToolsToToolContext, mergeTools, RegisteredToolsLoader } from './registered-tools.js';
 
 describe('mergeTools', () => {
   it('returns just the registered tools when there are no runtime tools', () => {
@@ -203,5 +204,76 @@ describe('RegisteredToolsLoader', () => {
 
     expect(listChatTools).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('inlineToolsToToolContext', () => {
+  const inlineTool = (
+    name: string,
+    params: Record<string, unknown> = { type: 'object' },
+  ): ChatTool => ({
+    name,
+    description: `${name} description`,
+    parameters: params,
+    executionMode: 'inline',
+    source: { kind: 'inline' },
+  });
+
+  it('converts only inline tools — webhook/builtin/integration stay gateway-executed', () => {
+    const ctx = inlineToolsToToolContext([
+      inlineTool('place_order'),
+      {
+        name: 'search_knowledge_base',
+        description: 'kb',
+        parameters: { type: 'object' },
+        executionMode: 'builtin',
+        source: { kind: 'builtin', name: 'search_knowledge_base', config: {} },
+      },
+      {
+        name: 'notify',
+        description: 'hook',
+        parameters: { type: 'object' },
+        executionMode: 'webhook',
+        source: { kind: 'webhook', url: 'https://example.com', secretRef: 'r' },
+      },
+    ]);
+    expect(Object.keys(ctx)).toEqual(['place_order']);
+  });
+
+  it('treats a missing executionMode as inline (pre-webhook contract default)', () => {
+    const bare: ChatTool = { name: 'capture', description: 'c', parameters: { type: 'object' } };
+    expect(Object.keys(inlineToolsToToolContext([bare]))).toEqual(['capture']);
+  });
+
+  it('skips names reserved by purpose-built runtime tools', () => {
+    const ctx = inlineToolsToToolContext([inlineTool('end_call'), inlineTool('place_order')], {
+      reservedNames: new Set(['end_call']),
+    });
+    expect(Object.keys(ctx)).toEqual(['place_order']);
+  });
+
+  it('produces a framework function tool that captures, reports, and acks', async () => {
+    const onExecuted = vi.fn();
+    const params = {
+      type: 'object',
+      required: ['item', 'size'],
+      properties: { item: { type: 'string' }, size: { type: 'string' } },
+    };
+    const ctx = inlineToolsToToolContext([inlineTool('place_order', params)], { onExecuted });
+    const tool = ctx['place_order'];
+    expect(llm.isFunctionTool(tool)).toBe(true);
+    expect(tool.description).toBe('place_order description');
+    // JSON-schema parameters pass through untouched for the provider payload.
+    expect(tool.parameters).toBe(params);
+
+    const args = { item: 'Pepperoni', size: 'large' };
+    const result = await tool.execute(args, {} as never);
+    expect(result).toEqual({ status: 'recorded' });
+    expect(onExecuted).toHaveBeenCalledWith('place_order', args);
+  });
+
+  it('returns an empty context for undefined/empty input', () => {
+    expect(Object.keys(inlineToolsToToolContext(undefined))).toEqual([]);
+    expect(Object.keys(inlineToolsToToolContext([]))).toEqual([]);
   });
 });

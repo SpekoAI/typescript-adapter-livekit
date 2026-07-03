@@ -1,3 +1,4 @@
+import { llm } from '@livekit/agents';
 import type { ChatTool, Speko } from '@spekoai/sdk';
 
 export interface RegisteredToolsLoaderOptions {
@@ -84,6 +85,67 @@ export class RegisteredToolsLoader {
       clearTimeout(timer);
     }
   }
+}
+
+export interface InlineToolContextOptions {
+  /**
+   * Names already claimed by purpose-built runtime tools (end_call, warm
+   * transfer, send_dtmf, …). A registered tool colliding with one of these is
+   * skipped — the purpose-built tool carries session behavior the generic
+   * capture executor must not shadow.
+   */
+  readonly reservedNames?: ReadonlySet<string>;
+  /**
+   * Called after a captured execution, with the tool name and the model's
+   * arguments. Hosts wire this to their logger so every recorded call is
+   * visible in the worker timeline.
+   */
+  readonly onExecuted?: (name: string, args: Record<string, unknown>) => void;
+}
+
+/**
+ * Convert registered INLINE tools into framework function tools with a
+ * capture-acknowledge executor, so a voice session can actually complete them.
+ *
+ * Why this exists (root-caused 2026-07-03 on the reliability loop): a
+ * dashboard-registered `inline` tool was definition-only on voice calls. The
+ * gateway returns inline tool calls verbatim BY DESIGN (API callers execute
+ * their own inline tools client-side), and the LiveKit framework executes only
+ * tools present in its ToolContext — which registered tools never entered. So
+ * the model would call `place_order`, and nothing anywhere could execute it:
+ * the call died silently and the conversation stalled or the model was never
+ * offered the tool's result. `webhook` / `builtin` / `integration` tools are
+ * deliberately NOT injected here — the gateway executes those server-side and
+ * folds the result into the next turn.
+ *
+ * The executor is capture-acknowledge: it records the call (via `onExecuted`,
+ * and the framework persists the FunctionCall/Output into the turn context)
+ * and returns `{ status: 'recorded' }` so the model can confirm to the caller
+ * and move on. That is the honest v1 semantic for an inline tool with no
+ * customer-side runtime attached to the call.
+ */
+export function inlineToolsToToolContext(
+  tools: readonly ChatTool[] | undefined,
+  opts: InlineToolContextOptions = {},
+): llm.ToolContext {
+  const ctx: llm.ToolContext = {};
+  for (const t of tools ?? []) {
+    if ((t.executionMode ?? 'inline') !== 'inline') continue;
+    if (opts.reservedNames?.has(t.name)) continue;
+    ctx[t.name] = llm.tool({
+      description: t.description,
+      // AgentTool parameters are stored as JSON Schema; the framework accepts
+      // JSONSchema7 directly (ToolInputSchema = ProviderFormat | JSONSchema7).
+      // The type is derived by indexing ToolContext because the llm namespace
+      // does not re-export ToolInputSchema itself.
+      parameters: t.parameters as unknown as llm.ToolContext[string]['parameters'],
+      execute: async (args: unknown) => {
+        opts.onExecuted?.(t.name, (args ?? {}) as Record<string, unknown>);
+        return { status: 'recorded' };
+      },
+    });
+  }
+  return ctx;
 }
 
 export interface MergeToolsOptions {
