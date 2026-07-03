@@ -49,7 +49,7 @@ export class RegisteredToolsLoader {
    * call failed.
    */
   load(): Promise<ChatTool[] | undefined> {
-    if (this.#pending) return this.#pending;
+    if (this.#pending !== undefined) return this.#pending;
     this.#pending = this.#fetch();
     return this.#pending;
   }
