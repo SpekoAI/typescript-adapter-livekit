@@ -116,7 +116,7 @@ export class SpekoLLM extends llm.LLM {
 
   override chat(params: {
     chatCtx: llm.ChatContext;
-    toolCtx?: llm.ToolContext;
+    toolCtx?: llm.ToolContextLike;
     connOptions?: APIConnectOptions;
     parallelToolCalls?: boolean;
     toolChoice?: llm.ToolChoice;
@@ -142,7 +142,7 @@ export class SpekoLLM extends llm.LLM {
 
 interface SpekoLLMStreamArgs {
   chatCtx: llm.ChatContext;
-  toolCtx?: llm.ToolContext;
+  toolCtx?: llm.ToolContextLike;
   toolChoice?: llm.ToolChoice;
   parallelToolCalls?: boolean;
   connOptions: APIConnectOptions;
@@ -423,9 +423,12 @@ class SpekoLLMStream extends llm.LLMStream {
  * Schemas are emitted as legacy (non-strict) JSON Schema; the proxy applies
  * provider-specific strict-mode adjustments.
  */
-function toolCtxToSpekoTools(toolCtx: llm.ToolContext | undefined): ChatTool[] | undefined {
+function toolCtxToSpekoTools(toolCtx: llm.ToolContextLike | undefined): ChatTool[] | undefined {
   if (!toolCtx) return undefined;
-  const entries = Object.entries(toolCtx);
+  // `ToolContext` is a class as of @livekit/agents 1.5 — Object.entries on the
+  // instance would iterate its private fields and silently drop every tool, so
+  // normalize first and read the name→tool map via the functionTools getter.
+  const entries = Object.entries(llm.toToolContext(toolCtx).functionTools);
   if (entries.length === 0) return undefined;
 
   const tools: ChatTool[] = [];

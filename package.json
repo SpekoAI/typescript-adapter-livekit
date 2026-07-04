@@ -67,8 +67,8 @@
     "@spekoai/sdk": "workspace:*"
   },
   "devDependencies": {
-    "@livekit/agents": "^1.4.3",
-    "@livekit/rtc-node": "^0.13.25",
+    "@livekit/agents": "^1.5.0",
+    "@livekit/rtc-node": "^0.13.30",
     "@types/node": "^25",
     "typescript": "~6.0.3"
   }

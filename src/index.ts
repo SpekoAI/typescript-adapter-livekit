@@ -12,6 +12,7 @@ export {
   type InlineToolContextOptions,
   inlineToolsToToolContext,
   RegisteredToolsLoader,
+  type ToolMap,
 } from './registered-tools.js';
 export { SpekoSTT, type SpekoSTTOptions } from './stt.js';
 export {

@@ -87,6 +87,14 @@ export class RegisteredToolsLoader {
   }
 }
 
+/**
+ * Plain map of framework function tools keyed by their model-visible name.
+ * Since `@livekit/agents` 1.5 `llm.ToolContext` is a class (no longer a
+ * record), so hosts assemble/merge tools in this map shape and hand the
+ * values to `voice.Agent({ tools })`, which accepts a tool array.
+ */
+export type ToolMap = llm.ToolContext['functionTools'];
+
 export interface InlineToolContextOptions {
   /**
    * Names already claimed by purpose-built runtime tools (end_call, warm
@@ -127,18 +135,19 @@ export interface InlineToolContextOptions {
 export function inlineToolsToToolContext(
   tools: readonly ChatTool[] | undefined,
   opts: InlineToolContextOptions = {},
-): llm.ToolContext {
-  const ctx: llm.ToolContext = {};
+): ToolMap {
+  const ctx: ToolMap = {};
   for (const t of tools ?? []) {
     if ((t.executionMode ?? 'inline') !== 'inline') continue;
     if (opts.reservedNames?.has(t.name)) continue;
     ctx[t.name] = llm.tool({
+      name: t.name,
       description: t.description,
       // AgentTool parameters are stored as JSON Schema; the framework accepts
       // JSONSchema7 directly (ToolInputSchema = ProviderFormat | JSONSchema7).
-      // The type is derived by indexing ToolContext because the llm namespace
-      // does not re-export ToolInputSchema itself.
-      parameters: t.parameters as unknown as llm.ToolContext[string]['parameters'],
+      // The type is derived from the tool() signature because the llm
+      // namespace does not re-export ToolInputSchema itself.
+      parameters: t.parameters as unknown as Parameters<typeof llm.tool>[0]['parameters'],
       execute: async (args: unknown) => {
         opts.onExecuted?.(t.name, (args ?? {}) as Record<string, unknown>);
         return { status: 'recorded' };
