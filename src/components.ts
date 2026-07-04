@@ -14,7 +14,7 @@ import { SpekoTTS, type SpekoTTSOptions } from './tts.js';
  * others stream text-only and must NOT claim word alignment. Keep in sync with
  * which provider adapters populate `SttEvent.words`.
  */
-const WORD_TIMESTAMP_STT_PROVIDERS = new Set(['deepgram', 'elevenlabs']);
+const WORD_TIMESTAMP_STT_PROVIDERS = new Set(['deepgram', 'elevenlabs', 'smallest']);
 
 export interface CreateSpekoComponentsOptions {
   /** Initialised Speko client from `@spekoai/sdk`. */
