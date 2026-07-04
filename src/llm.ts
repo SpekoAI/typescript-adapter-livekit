@@ -2,6 +2,7 @@ import { type APIConnectOptions, DEFAULT_API_CONNECT_OPTIONS, llm, log } from '@
 import type {
   ChatTool,
   ChatToolChoice,
+  CompleteParams,
   PipelineConstraints,
   Speko,
   ChatMessage as SpekoChatMessage,
@@ -19,6 +20,11 @@ export class SpekoAdapterError extends Error {
     this.name = 'SpekoAdapterError';
     this.code = code;
   }
+}
+
+export interface SpekoLLMGenerationInfo {
+  epoch: number;
+  at: number;
 }
 
 export interface SpekoLLMOptions {
@@ -57,7 +63,19 @@ export interface SpekoLLMOptions {
    * running with runtime-only tools — this is a soft degradation.
    */
   onRegisteredToolsError?: (err: Error) => void;
+  /**
+   * Called when a new `.chat()` stream is created. Epochs are per SpekoLLM
+   * instance and strictly increase from 1.
+   */
+  onGenerationStarted?: (info: SpekoLLMGenerationInfo) => void;
+  /**
+   * Called when a `.chat()` stream exits through the framework abort path
+   * (typically barge-in). Not called for completed or faulted generations.
+   */
+  onGenerationAborted?: (info: SpekoLLMGenerationInfo) => void;
 }
+
+type VoiceCompleteParams = CompleteParams & { readonly voiceOptimized: true };
 
 /**
  * LiveKit Agents LLM adapter that delegates completion to the Speko proxy
@@ -76,6 +94,9 @@ export class SpekoLLM extends llm.LLM {
   readonly #constraints: PipelineConstraints | undefined;
   readonly #sessionTools: readonly ChatTool[] | undefined;
   readonly #registeredLoader: RegisteredToolsLoader | undefined;
+  readonly #onGenerationStarted: ((info: SpekoLLMGenerationInfo) => void) | undefined;
+  readonly #onGenerationAborted: ((info: SpekoLLMGenerationInfo) => void) | undefined;
+  #generationEpoch = 0;
 
   constructor(options: SpekoLLMOptions) {
     super();
@@ -87,6 +108,8 @@ export class SpekoLLM extends llm.LLM {
     this.#maxTokens = options.maxTokens;
     this.#constraints = options.constraints;
     this.#sessionTools = options.tools;
+    this.#onGenerationStarted = options.onGenerationStarted;
+    this.#onGenerationAborted = options.onGenerationAborted;
 
     if (options.agentId) {
       this.#registeredLoader = new RegisteredToolsLoader({
@@ -122,7 +145,9 @@ export class SpekoLLM extends llm.LLM {
     toolChoice?: llm.ToolChoice;
     extraKwargs?: Record<string, unknown>;
   }): llm.LLMStream {
+    const generation = this.#nextGeneration();
     return new SpekoLLMStream(this, {
+      generation,
       chatCtx: params.chatCtx,
       toolCtx: params.toolCtx,
       toolChoice: params.toolChoice,
@@ -136,11 +161,28 @@ export class SpekoLLM extends llm.LLM {
       constraints: this.#constraints,
       registeredLoader: this.#registeredLoader,
       sessionTools: this.#sessionTools,
+      onGenerationAborted: this.#onGenerationAborted,
     });
+  }
+
+  #nextGeneration(): SpekoLLMGenerationInfo {
+    const generation = { epoch: (this.#generationEpoch += 1), at: Date.now() };
+    if (this.#onGenerationStarted !== undefined) {
+      try {
+        this.#onGenerationStarted(generation);
+      } catch (err) {
+        log().warn(
+          { error: err instanceof Error ? err.message : String(err), epoch: generation.epoch },
+          '[SpekoLLM] generation-start-hook:error',
+        );
+      }
+    }
+    return generation;
   }
 }
 
 interface SpekoLLMStreamArgs {
+  generation: SpekoLLMGenerationInfo;
   chatCtx: llm.ChatContext;
   toolCtx?: llm.ToolContextLike;
   toolChoice?: llm.ToolChoice;
@@ -154,6 +196,7 @@ interface SpekoLLMStreamArgs {
   constraints?: PipelineConstraints;
   registeredLoader?: RegisteredToolsLoader;
   sessionTools?: readonly ChatTool[];
+  onGenerationAborted?: (info: SpekoLLMGenerationInfo) => void;
 }
 
 class SpekoLLMStream extends llm.LLMStream {
@@ -167,6 +210,8 @@ class SpekoLLMStream extends llm.LLMStream {
   readonly #toolChoice: llm.ToolChoice | undefined;
   readonly #parallelToolCalls: boolean | undefined;
   readonly #registeredLoader: RegisteredToolsLoader | undefined;
+  readonly #generation: SpekoLLMGenerationInfo;
+  readonly #onGenerationAborted: ((info: SpekoLLMGenerationInfo) => void) | undefined;
 
   constructor(parent: SpekoLLM, args: SpekoLLMStreamArgs) {
     super(parent, {
@@ -184,6 +229,8 @@ class SpekoLLMStream extends llm.LLMStream {
     this.#toolChoice = args.toolChoice;
     this.#parallelToolCalls = args.parallelToolCalls;
     this.#registeredLoader = args.registeredLoader;
+    this.#generation = args.generation;
+    this.#onGenerationAborted = args.onGenerationAborted;
   }
 
   protected async run(): Promise<void> {
@@ -205,6 +252,7 @@ class SpekoLLMStream extends llm.LLMStream {
             '[SpekoLLM] complete:error-during-abort',
           );
         }
+        this.#notifyGenerationAborted();
         return;
       }
       // Otherwise hand the framework a classified APIError so its maxRetry loop
@@ -213,6 +261,21 @@ class SpekoLLMStream extends llm.LLMStream {
       // (401 auth, INVALID_CONTEXT) surfaces recoverable:false. A bare Error
       // here would skip retries and close the session on the first blip.
       throw toFrameworkApiError(err);
+    }
+  }
+
+  #notifyGenerationAborted(): void {
+    if (this.#onGenerationAborted === undefined) return;
+    try {
+      this.#onGenerationAborted({ epoch: this.#generation.epoch, at: Date.now() });
+    } catch (err) {
+      log().warn(
+        {
+          error: err instanceof Error ? err.message : String(err),
+          epoch: this.#generation.epoch,
+        },
+        '[SpekoLLM] generation-abort-hook:error',
+      );
     }
   }
 
@@ -261,7 +324,7 @@ class SpekoLLMStream extends llm.LLMStream {
       '[SpekoLLM] complete:start',
     );
 
-    const completeParams = {
+    const completeParams: VoiceCompleteParams = {
       messages,
       intent: {
         language: this.#intent.language,
@@ -270,6 +333,7 @@ class SpekoLLMStream extends llm.LLMStream {
           optimizeFor: this.#intent.optimizeFor,
         }),
       },
+      voiceOptimized: true,
       ...(this.#sessionId !== undefined && { sessionId: this.#sessionId }),
       ...(this.#temperature !== undefined && { temperature: this.#temperature }),
       ...(this.#maxTokens !== undefined && { maxTokens: this.#maxTokens }),

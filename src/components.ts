@@ -101,6 +101,10 @@ export interface CreateSpekoComponentsOptions {
   apiKey?: string;
   /** Called once if the registered-tools fetch fails (soft degradation). */
   onRegisteredToolsError?: (err: Error) => void;
+  /** Optional SpekoLLM generation lifecycle hook. */
+  onGenerationStarted?: SpekoLLMOptions['onGenerationStarted'];
+  /** Optional SpekoLLM abort lifecycle hook. */
+  onGenerationAborted?: SpekoLLMOptions['onGenerationAborted'];
 }
 
 export interface SpekoComponents {
@@ -166,10 +170,10 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   // dashboard always stores the qualified form), so compare the provider
   // prefix only.
   const pinnedStt = options.constraints?.allowedProviders?.stt;
-  const pinnedSttProvider = String(pinnedStt?.[0] ?? '')
+  const [pinnedSttProvider = ''] = String(pinnedStt?.[0] ?? '')
     .trim()
     .toLowerCase()
-    .split(':')[0]!;
+    .split(':');
   const alignedTranscript =
     sttStreaming &&
     Array.isArray(pinnedStt) &&
@@ -202,6 +206,12 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
     ...(options.agentId !== undefined && { agentId: options.agentId }),
     ...(options.onRegisteredToolsError !== undefined && {
       onRegisteredToolsError: options.onRegisteredToolsError,
+    }),
+    ...(options.onGenerationStarted !== undefined && {
+      onGenerationStarted: options.onGenerationStarted,
+    }),
+    ...(options.onGenerationAborted !== undefined && {
+      onGenerationAborted: options.onGenerationAborted,
     }),
   };
   const ttsOptions: SpekoTTSOptions = {
