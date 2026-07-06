@@ -459,6 +459,16 @@ export class SpekoSpeechStream extends stt.SpeechStream {
    * aligned streams (non-aligned emission is unchanged).
    */
   #connEpochOffsetS = 0;
+  #framesReceived = 0;
+  #finalsReceived = 0;
+  #emptyFinalsDropped = 0;
+  #emptyInterimsDropped = 0;
+  #transcriptsEmitted = 0;
+  #audioMsPumped = 0;
+  #alignedRebaseApplied = 0;
+  #alignedWordStartOffsetMinS: number | null = null;
+  #alignedWordStartOffsetMaxS: number | null = null;
+  #summaryLogged = false;
 
   constructor(sttImpl: SpekoSTT, opts: SpekoSpeechStreamOptions) {
     super(sttImpl);
@@ -473,6 +483,23 @@ export class SpekoSpeechStream extends stt.SpeechStream {
   }
 
   protected async run(): Promise<void> {
+    try {
+      await this.#runUntilDone();
+    } finally {
+      this.#logSummary();
+    }
+  }
+
+  override close(): void {
+    super.close();
+    // Fallback summary for a wedged connection: run()'s finally logs the
+    // complete counters first when the loop unwinds promptly (#summaryLogged
+    // dedupes); this only fires if it never does.
+    const fallback = setTimeout(() => this.#logSummary(), 250);
+    fallback.unref?.();
+  }
+
+  async #runUntilDone(): Promise<void> {
     // The framework feeds frames into `this.input`. We must drain it exactly
     // once across the whole session (it can't be re-iterated), so the input
     // iterator lives outside the reconnect loop: a reconnect resumes consuming
@@ -657,6 +684,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
               headerSent = true;
             }
             ws.send(pcmBytes(frame));
+            this.#audioMsPumped += audioFrameDurationMs(frame);
             // Mark that this connection carried real audio — the run loop uses
             // this to decide whether a drop counts as a "healthy" reconnect or
             // whether a no-audio stream should give up (SPE-121).
@@ -793,9 +821,14 @@ export class SpekoSpeechStream extends stt.SpeechStream {
 
   #emitTranscript(frame: ServerTranscriptFrame): void {
     if (this.queue.closed) return;
+    this.#framesReceived += 1;
     const text = frame.text ?? '';
     const isFinal = frame.isFinal === true;
-    if (!text && !isFinal) return;
+    if (isFinal) this.#finalsReceived += 1;
+    if (!text && !isFinal) {
+      this.#emptyInterimsDropped += 1;
+      return;
+    }
     // Map per-word timings into TimedString[] when the gateway forwarded them.
     // LiveKit's adaptive interruption detector aligns these against the audio
     // clock; SpeechData.startTime/endTime span the whole utterance. On aligned
@@ -824,6 +857,10 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     if (words?.length) {
       startTime = words[0]?.startTime ?? 0;
       endTime = words[words.length - 1]?.endTime ?? 0;
+      if (aligned) {
+        this.#alignedRebaseApplied += 1;
+        for (const word of words) this.#recordAlignedWordStartOffset(word.startTime ?? Number.NaN);
+      }
       // Same 0/0-sentinel insurance as the words-less branch, for the
       // theoretical zero-duration-word-at-0 + same-millisecond-onopen case.
       if (aligned) endTime = Math.max(endTime, 0.001);
@@ -837,7 +874,10 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       // is stamped at the session clock "now" (≈ the end of the audio it
       // transcribes, one transcription delay late) so it stays orderable and
       // can never look like pre-playback echo.
-      if (!text && !this.#speaking) return;
+      if (!text && !this.#speaking) {
+        this.#emptyFinalsDropped += 1;
+        return;
+      }
       // Floor at 1ms: a frame landing in the epoch's own millisecond must
       // still never produce the 0/0 sentinel.
       const nowS = Math.max((this.#now() - this.#streamEpochMs) / 1000, 0.001);
@@ -858,11 +898,25 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     }
     if (isFinal) {
       this.queue.put({ type: stt.SpeechEventType.FINAL_TRANSCRIPT, alternatives: [speechData] });
+      this.#transcriptsEmitted += 1;
       this.#speaking = false;
       this.queue.put({ type: stt.SpeechEventType.END_OF_SPEECH });
     } else {
       this.queue.put({ type: stt.SpeechEventType.INTERIM_TRANSCRIPT, alternatives: [speechData] });
+      this.#transcriptsEmitted += 1;
     }
+  }
+
+  #recordAlignedWordStartOffset(startTime: number): void {
+    if (!Number.isFinite(startTime)) return;
+    this.#alignedWordStartOffsetMinS =
+      this.#alignedWordStartOffsetMinS === null
+        ? startTime
+        : Math.min(this.#alignedWordStartOffsetMinS, startTime);
+    this.#alignedWordStartOffsetMaxS =
+      this.#alignedWordStartOffsetMaxS === null
+        ? startTime
+        : Math.max(this.#alignedWordStartOffsetMaxS, startTime);
   }
 
   #emitError(error: Error): void {
@@ -939,6 +993,31 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     const tag = this.#sessionId ? `speko.SpeechStream ${this.#sessionId}` : 'speko.SpeechStream';
     console.error(`[${tag}] ${message}`);
   }
+
+  #logSummary(): void {
+    if (this.#summaryLogged) return;
+    this.#summaryLogged = true;
+    const summary = {
+      marker: 'stt_stream_summary',
+      label: this.label,
+      sessionId: this.#sessionId ?? null,
+      framesReceived: this.#framesReceived,
+      finalsReceived: this.#finalsReceived,
+      emptyFinalsDropped: this.#emptyFinalsDropped,
+      emptyInterimsDropped: this.#emptyInterimsDropped,
+      transcriptsEmitted: this.#transcriptsEmitted,
+      audioMsPumped: Math.round(this.#audioMsPumped),
+      alignedRebaseApplied: this.#alignedRebaseApplied,
+      alignedWordStartOffsetMinS: this.#alignedWordStartOffsetMinS,
+      alignedWordStartOffsetMaxS: this.#alignedWordStartOffsetMaxS,
+    };
+    const line = JSON.stringify(summary);
+    if (summary.transcriptsEmitted === 0 && this.#audioMsPumped > 15_000) {
+      console.warn(line);
+    } else {
+      console.info(line);
+    }
+  }
 }
 
 function toWsUrl(baseUrl: string): string {
@@ -951,6 +1030,10 @@ function toWsUrl(baseUrl: string): string {
 function pcmBytes(frame: AudioFrame): Uint8Array {
   const data = frame.data;
   return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+}
+
+function audioFrameDurationMs(frame: AudioFrame): number {
+  return frame.sampleRate > 0 ? (frame.samplesPerChannel / frame.sampleRate) * 1000 : 0;
 }
 
 /**

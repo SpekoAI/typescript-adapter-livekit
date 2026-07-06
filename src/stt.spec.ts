@@ -331,14 +331,20 @@ describe('SpekoSpeechStream reconnect resilience', () => {
   }
 
   let errSpy: ReturnType<typeof vi.spyOn>;
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     // The base SpeechStream constructor instantiates the framework logger, which
     // requires this in a unit context (no worker bootstrap runs it).
     initializeLogger({ pretty: false, level: 'fatal' });
     errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
   afterEach(() => {
     errSpy.mockRestore();
+    infoSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 
   it('uses production defaults (5 consecutive reconnects, 5s ceiling)', () => {
@@ -584,12 +590,18 @@ describe('SpekoSpeechStream flush-endpoint (SPEKO_NAVAI_FLUSH_ENDPOINT)', () => 
   };
 
   let errSpy: ReturnType<typeof vi.spyOn>;
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     initializeLogger({ pretty: false, level: 'fatal' });
     errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
   afterEach(() => {
     errSpy.mockRestore();
+    infoSpy.mockRestore();
+    warnSpy.mockRestore();
     delete process.env.SPEKO_NAVAI_FLUSH_ENDPOINT;
   });
 
@@ -703,12 +715,18 @@ describe('SpekoSpeechStream word-aligned emission', () => {
   };
 
   let errSpy: ReturnType<typeof vi.spyOn>;
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     initializeLogger({ pretty: false, level: 'fatal' });
     errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
   afterEach(() => {
     errSpy.mockRestore();
+    infoSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 
   function streamingStt() {
@@ -789,6 +807,16 @@ describe('SpekoSpeechStream word-aligned emission', () => {
     return undefined;
   }
 
+  function hasSentFrame(sent: string[], type: string): boolean {
+    return sent.some((s) => {
+      try {
+        return (JSON.parse(s) as { type?: string }).type === type;
+      } catch {
+        return false;
+      }
+    });
+  }
+
   const wordedFinal = {
     type: 'transcript',
     text: 'hello world',
@@ -842,6 +870,81 @@ describe('SpekoSpeechStream word-aligned emission', () => {
     expect(finals[0]?.alternatives?.[0]?.startTime).toBe(1.5);
     expect(finals[0]?.alternatives?.[0]?.endTime).toBe(2.5);
     expect(got.filter((e) => e.type === stt.SpeechEventType.START_OF_SPEECH)).toHaveLength(1);
+  });
+
+  it('logs one close summary with transcript drop/emission counters', async () => {
+    const sent: string[] = [];
+    const stream = new SpekoSpeechStream(streamingStt(), {
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      intent: base,
+      sessionId: 'sess-observe',
+      constraints: undefined,
+      keywords: undefined,
+      alignedTranscript: true,
+      createWebSocket: frameDeliveringWs(
+        [
+          { type: 'transcript', text: '', isFinal: false, confidence: 0 },
+          emptyWordlessFinal,
+          wordedFinal,
+        ],
+        sent,
+      ),
+      reconnect: fastReconnect,
+      now: () => 0,
+    });
+    const got: stt.SpeechEvent[] = [];
+    const reader = (async () => {
+      for await (const ev of stream) got.push(ev);
+    })();
+
+    stream.pushFrame(new AudioFrame(new Int16Array(16_000), 16_000, 1, 16_000));
+    stream.endInput();
+    await vi.waitFor(
+      () => expect(got.some((e) => e.type === stt.SpeechEventType.FINAL_TRANSCRIPT)).toBe(true),
+      { timeout: 3000, interval: 5 },
+    );
+    await vi.waitFor(() => expect(hasSentFrame(sent, 'end')).toBe(true), {
+      timeout: 1000,
+      interval: 5,
+    });
+    stream.close();
+    await reader;
+
+    // The summary is emitted from run()'s finally, which settles just after
+    // the reader drains - poll briefly instead of asserting synchronously.
+    const findSummaryCall = () =>
+      infoSpy.mock.calls.find(
+        ([line]) =>
+          typeof line === 'string' &&
+          line.includes('"marker":"stt_stream_summary"') &&
+          line.includes('"sessionId":"sess-observe"'),
+      );
+    await vi.waitFor(() => expect(findSummaryCall()).toBeDefined(), {
+      timeout: 1000,
+      interval: 5,
+    });
+    const summaryCall = findSummaryCall();
+    const summary = JSON.parse(summaryCall?.[0] as string) as Record<string, unknown>;
+    expect(summary).toMatchObject({
+      marker: 'stt_stream_summary',
+      label: 'speko.SpeechStream',
+      sessionId: 'sess-observe',
+      framesReceived: 3,
+      finalsReceived: 2,
+      emptyFinalsDropped: 1,
+      emptyInterimsDropped: 1,
+      transcriptsEmitted: 1,
+      audioMsPumped: 1000,
+      alignedRebaseApplied: 1,
+      alignedWordStartOffsetMinS: 1.5,
+      alignedWordStartOffsetMaxS: 2,
+    });
+    expect(
+      warnSpy.mock.calls.some(
+        ([line]) => typeof line === 'string' && line.includes('"marker":"stt_stream_summary"'),
+      ),
+    ).toBe(false);
   });
 
   it('aligned: stamps words-less non-empty frames at the session clock — never the 0/0 sentinel, even before any worded frame', async () => {
