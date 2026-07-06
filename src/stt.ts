@@ -74,6 +74,19 @@ export interface SpekoSTTOptions {
    * single known word-emitter; ad-hoc construction leaves it false (safe).
    */
   alignedTranscript?: boolean;
+  /**
+   * Test seam: WebSocket factory forwarded to every stream created by
+   * {@link SpekoSTT.stream}. Production leaves this unset (global WHATWG
+   * WebSocket).
+   * @internal
+   */
+  createWebSocket?: WebSocketFactory;
+  /**
+   * Test seam: reconnect policy overrides forwarded to every stream created by
+   * {@link SpekoSTT.stream}.
+   * @internal
+   */
+  reconnect?: Partial<ReconnectPolicy>;
 }
 
 /**
@@ -105,6 +118,14 @@ export class SpekoSTT extends stt.STT {
   readonly #baseUrl: string | undefined;
   readonly #apiKey: string | undefined;
   readonly #alignedTranscript: boolean;
+  readonly #createWebSocket: WebSocketFactory | undefined;
+  readonly #reconnect: Partial<ReconnectPolicy> | undefined;
+  /**
+   * Live streams handed out by {@link stream}. Session-scoped (one stream per
+   * call in practice); pruned lazily in {@link flushActiveStreams}, so a
+   * retired stream never pins memory past the next flush attempt.
+   */
+  readonly #activeStreams = new Set<SpekoSpeechStream>();
 
   constructor(options: SpekoSTTOptions) {
     const streaming = options.streaming ?? false;
@@ -139,6 +160,8 @@ export class SpekoSTT extends stt.STT {
     this.#baseUrl = options.baseUrl;
     this.#apiKey = options.apiKey;
     this.#alignedTranscript = alignedTranscript === 'word';
+    this.#createWebSocket = options.createWebSocket;
+    this.#reconnect = options.reconnect;
   }
 
   override get provider(): string {
@@ -209,7 +232,7 @@ export class SpekoSTT extends stt.STT {
       // type guard so the options object below needs no non-null assertions.
       throw new Error('SpekoSTT: streaming requires baseUrl and apiKey');
     }
-    return new SpekoSpeechStream(this, {
+    const stream = new SpekoSpeechStream(this, {
       baseUrl: this.#baseUrl,
       apiKey: this.#apiKey,
       intent: this.#intent,
@@ -217,8 +240,38 @@ export class SpekoSTT extends stt.STT {
       constraints: this.#constraints,
       keywords: this.#keywords,
       alignedTranscript: this.#alignedTranscript,
+      ...(this.#createWebSocket ? { createWebSocket: this.#createWebSocket } : {}),
+      ...(this.#reconnect ? { reconnect: this.#reconnect } : {}),
       ...(options?.connOptions ? { connOptions: options.connOptions } : {}),
     });
+    this.#activeStreams.add(stream);
+    return stream;
+  }
+
+  /**
+   * Push the framework's FLUSH_SENTINEL into every live stream. The worker
+   * calls this at VAD end-of-speech: the @livekit/agents voice pipeline never
+   * flushes a native streaming STT itself (it only flushes the batch
+   * StreamAdapter), so without this nudge a provider that endpoints
+   * server-side (navai, smallest/pulse) finalizes on its OWN silence timer,
+   * ~1-3s after the caller stopped — the dominant EOU latency term. No-op per
+   * stream once it is closed or its input has ended; retired streams are
+   * pruned here.
+   */
+  flushActiveStreams(): void {
+    for (const stream of this.#activeStreams) {
+      if (stream.isRetired) {
+        this.#activeStreams.delete(stream);
+        continue;
+      }
+      try {
+        stream.flush();
+      } catch {
+        // flush() throws once the stream/input closed between the guard and
+        // the call — the stream is done; drop it and move on.
+        this.#activeStreams.delete(stream);
+      }
+    }
   }
 }
 
@@ -411,12 +464,14 @@ function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
 
 /**
  * Opt-in flush-endpoint path (read per-call so tests / runtime env changes take
- * effect without a re-import). When on, the framework's utterance-boundary
- * FLUSH_SENTINEL is forwarded to the proxy as a `{type:'flush'}` frame; default
- * off → the sentinel is swallowed exactly as before. See SPEKO_NAVAI_FLUSH_ENDPOINT.
+ * effect without a re-import). When on, an utterance-boundary FLUSH_SENTINEL —
+ * pushed by the worker at VAD end-of-speech (the 1.5.0 voice pipeline never
+ * flushes a native streaming STT itself) — is forwarded to the proxy as a
+ * `{type:'flush'}` frame; default off → the sentinel is swallowed exactly as
+ * before. See SPEKO_STT_FLUSH_ENDPOINT.
  */
-function flushEndpointEnabled(): boolean {
-  return process.env.SPEKO_NAVAI_FLUSH_ENDPOINT === 'true';
+export function sttFlushEndpointEnabled(): boolean {
+  return process.env.SPEKO_STT_FLUSH_ENDPOINT === 'true';
 }
 
 /**
@@ -469,6 +524,16 @@ export class SpekoSpeechStream extends stt.SpeechStream {
   #alignedWordStartOffsetMinS: number | null = null;
   #alignedWordStartOffsetMaxS: number | null = null;
   #summaryLogged = false;
+
+  /**
+   * True once this stream can no longer accept input (closed, or the
+   * framework ended the input queue). `closed`/`input` are protected on the
+   * base class, so the owning {@link SpekoSTT} needs this to prune its
+   * active-stream registry without calling `flush()` into a throw.
+   */
+  get isRetired(): boolean {
+    return this.closed || this.input.closed;
+  }
 
   constructor(sttImpl: SpekoSTT, opts: SpekoSpeechStreamOptions) {
     super(sttImpl);
@@ -665,14 +730,16 @@ export class SpekoSpeechStream extends stt.SpeechStream {
             }
             const value = result.value;
             if (value === stt.SpeechStream.FLUSH_SENTINEL) {
-              // Utterance boundary from the framework's turn detector. By default
-              // there's no wire frame for it. When the flush-endpoint path is on
-              // (SPEKO_NAVAI_FLUSH_ENDPOINT), forward it as a {type:'flush'} frame
-              // so a provider that needs client-driven endpointing (navai) can
-              // finalize on this semantic turn signal instead of a second energy
-              // VAD. The server ignores it unless the stream is navai-pinned, so
-              // this is safe for every other provider; off by default → unchanged.
-              if (flushEndpointEnabled() && ws.readyState === WS_OPEN) {
+              // Utterance boundary from the worker's VAD end-of-speech signal
+              // (via SpekoSTT.flushActiveStreams). By default there's no wire
+              // frame for it. When the flush-endpoint path is on
+              // (SPEKO_STT_FLUSH_ENDPOINT), forward it as a {type:'flush'} frame
+              // so a provider whose own endpointing lags (navai, smallest/pulse)
+              // can finalize on this semantic turn signal instead of waiting out
+              // its server-side silence timer. The server ignores it unless the
+              // pinned provider is flush-capable, so this is safe for every
+              // other provider; off by default → unchanged.
+              if (sttFlushEndpointEnabled() && ws.readyState === WS_OPEN) {
                 ws.send(JSON.stringify({ type: 'flush' }));
               }
               continue;

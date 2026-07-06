@@ -579,7 +579,7 @@ describe('SpekoSpeechStream reconnect resilience', () => {
   });
 });
 
-describe('SpekoSpeechStream flush-endpoint (SPEKO_NAVAI_FLUSH_ENDPOINT)', () => {
+describe('SpekoSpeechStream flush-endpoint (SPEKO_STT_FLUSH_ENDPOINT)', () => {
   const base = { language: 'en' };
   const fastReconnect = {
     baseDelayMs: 1,
@@ -602,7 +602,7 @@ describe('SpekoSpeechStream flush-endpoint (SPEKO_NAVAI_FLUSH_ENDPOINT)', () => 
     errSpy.mockRestore();
     infoSpy.mockRestore();
     warnSpy.mockRestore();
-    delete process.env.SPEKO_NAVAI_FLUSH_ENDPOINT;
+    delete process.env.SPEKO_STT_FLUSH_ENDPOINT;
   });
 
   function streamingStt() {
@@ -668,7 +668,7 @@ describe('SpekoSpeechStream flush-endpoint (SPEKO_NAVAI_FLUSH_ENDPOINT)', () => 
     });
 
   it('forwards a flush as {type:"flush"} when the flag is on', async () => {
-    process.env.SPEKO_NAVAI_FLUSH_ENDPOINT = 'true';
+    process.env.SPEKO_STT_FLUSH_ENDPOINT = 'true';
     const sent: string[] = [];
     const stream = makeStream(sent);
     await vi.waitFor(() => expect(hasFrame(sent, 'config')).toBe(true), {
@@ -684,7 +684,7 @@ describe('SpekoSpeechStream flush-endpoint (SPEKO_NAVAI_FLUSH_ENDPOINT)', () => 
   });
 
   it('does NOT send a flush frame when the flag is off (unchanged behavior)', async () => {
-    delete process.env.SPEKO_NAVAI_FLUSH_ENDPOINT;
+    delete process.env.SPEKO_STT_FLUSH_ENDPOINT;
     const sent: string[] = [];
     const stream = makeStream(sent);
     await vi.waitFor(() => expect(hasFrame(sent, 'config')).toBe(true), {
@@ -695,6 +695,43 @@ describe('SpekoSpeechStream flush-endpoint (SPEKO_NAVAI_FLUSH_ENDPOINT)', () => 
     await new Promise((r) => setTimeout(r, 60)); // let pumpAudio drain the sentinel
     expect(hasFrame(sent, 'flush')).toBe(false);
     stream.close();
+  });
+
+  it('flushActiveStreams reaches streams created via stream() and no-ops once they close', async () => {
+    process.env.SPEKO_STT_FLUSH_ENDPOINT = 'true';
+    const sent: string[] = [];
+    const { speko } = makeFakeSpeko({
+      text: '',
+      provider: 'smallest',
+      model: 'pulse',
+      confidence: 1,
+      failoverCount: 0,
+      scoresRunId: null,
+    });
+    const sttImpl = new SpekoSTT({
+      speko,
+      intent: base,
+      streaming: true,
+      baseUrl: 'https://api.speko.dev',
+      apiKey: 'sk-test',
+      createWebSocket: openingWsFactory(sent),
+      reconnect: fastReconnect,
+    });
+    const stream = sttImpl.stream();
+    await vi.waitFor(() => expect(hasFrame(sent, 'config')).toBe(true), {
+      timeout: 1000,
+      interval: 5,
+    });
+    // The worker's VAD end-of-speech hook calls this — the sentinel must reach
+    // the wire as {type:'flush'} without the caller holding the stream itself.
+    sttImpl.flushActiveStreams();
+    await vi.waitFor(() => expect(hasFrame(sent, 'flush')).toBe(true), {
+      timeout: 1000,
+      interval: 5,
+    });
+    stream.close();
+    // Retired stream: the registry prunes it instead of flushing into a throw.
+    expect(() => sttImpl.flushActiveStreams()).not.toThrow();
   });
 });
 
