@@ -14,7 +14,7 @@ import { SpekoTTS, type SpekoTTSOptions } from './tts.js';
  * others stream text-only and must NOT claim word alignment. Keep in sync with
  * which provider adapters populate `SttEvent.words`.
  */
-const WORD_TIMESTAMP_STT_PROVIDERS = new Set(['deepgram', 'elevenlabs', 'smallest']);
+const WORD_TIMESTAMP_STT_PROVIDERS = new Set(['deepgram', 'elevenlabs', 'smallest', 'cartesia']);
 
 export interface CreateSpekoComponentsOptions {
   /** Initialised Speko client from `@spekoai/sdk`. */
@@ -165,7 +165,7 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   // STATICALLY by LiveKit before routing, so claiming 'word' for a provider
   // that won't deliver would feed the adaptive interruption detector empty
   // arrays. We only know the provider for certain when constraints pin exactly
-  // one, and only deepgram/elevenlabs emit word timings through the gateway.
+  // one, and only the WORD_TIMESTAMP_STT_PROVIDERS emit word timings.
   // Pins may be bare ("deepgram") or model-qualified ("deepgram:nova-3" — the
   // dashboard always stores the qualified form), so compare the provider
   // prefix only.

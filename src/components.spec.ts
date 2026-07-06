@@ -111,13 +111,14 @@ describe('createSpekoComponents', () => {
       ['deepgram:nova-3'],
       ['DeepGram:NOVA-3'],
       ['elevenlabs:scribe-rt'],
+      ['cartesia:ink-whisper'],
     ])('declares word alignment for the single word-emitting pin %j (bare or model-qualified)', (pin) => {
       expect(makeStreaming([pin]).stt.capabilities.alignedTranscript).toBe('word');
     });
 
     it.each([
       [['deepgram:nova-3', 'elevenlabs:scribe-rt']], // multiple pins → provider not guaranteed
-      [['cartesia:ink-whisper']], // pinned, but no word timings through the gateway
+      [['google']], // pinned, but not a word-emitting provider
       [[]],
       [undefined],
     ])('does NOT declare word alignment for pins %j', (pins) => {
