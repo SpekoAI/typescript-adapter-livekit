@@ -52,10 +52,11 @@ export interface CreateSpekoComponentsOptions {
    */
   ttsOptions?: Pick<SpekoTTSOptions, 'sampleRate' | 'speed' | 'instructions'>;
   /**
-   * Optional STT tuning. Currently exposes `keywords` for domain-vocabulary
-   * biasing — forwarded to the underlying provider via `speko.transcribe`.
+   * Optional STT tuning. `keywords` provides domain-vocabulary biasing and
+   * `language` overrides only the underlying provider's stream language; the
+   * routing intent remains unchanged. Forwarded via `speko.transcribe`.
    */
-  sttOptions?: Pick<SpekoSTTOptions, 'keywords'>;
+  sttOptions?: Pick<SpekoSTTOptions, 'keywords' | 'language'>;
   /**
    * Use the Speko proxy's native streaming STT WebSocket
    * (`GET /v1/transcribe/stream`) instead of the VAD-bounded batch upload path.
@@ -188,6 +189,9 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
     ...(options.sttOptions?.keywords && options.sttOptions.keywords.length > 0
       ? { keywords: options.sttOptions.keywords }
       : {}),
+    ...(options.sttOptions?.language !== undefined && {
+      language: options.sttOptions.language,
+    }),
     ...(sttStreaming && {
       streaming: true,
       baseUrl: options.sttBaseUrl,

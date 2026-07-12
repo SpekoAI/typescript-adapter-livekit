@@ -34,6 +34,11 @@ export interface SpekoSTTOptions {
    */
   keywords?: readonly string[];
   /**
+   * Optional language override forwarded only to the selected STT provider.
+   * Routing and transcript language labels continue to use {@link intent}.
+   */
+  language?: string;
+  /**
    * Enable native microphone streaming via the Speko proxy's
    * `GET /v1/transcribe/stream` WebSocket endpoint. When `true`, this STT
    * declares `{ streaming: true }` and `stream()` opens a long-lived WS that
@@ -114,6 +119,7 @@ export class SpekoSTT extends stt.STT {
   readonly #sessionId: string | undefined;
   readonly #constraints: PipelineConstraints | undefined;
   readonly #keywords: readonly string[] | undefined;
+  readonly #sttLanguage: string | undefined;
   readonly #streaming: boolean;
   readonly #baseUrl: string | undefined;
   readonly #apiKey: string | undefined;
@@ -156,6 +162,7 @@ export class SpekoSTT extends stt.STT {
     this.#sessionId = options.sessionId;
     this.#constraints = options.constraints;
     this.#keywords = options.keywords && options.keywords.length > 0 ? options.keywords : undefined;
+    this.#sttLanguage = options.language;
     this.#streaming = streaming;
     this.#baseUrl = options.baseUrl;
     this.#apiKey = options.apiKey;
@@ -191,6 +198,9 @@ export class SpekoSTT extends stt.STT {
           ...(this.#sessionId !== undefined && { sessionId: this.#sessionId }),
           ...(this.#constraints !== undefined && { constraints: this.#constraints }),
           ...(this.#keywords !== undefined && { keywords: this.#keywords }),
+          ...(this.#sttLanguage !== undefined && {
+            sttOptions: { language: this.#sttLanguage },
+          }),
         },
         abortSignal,
       );
@@ -239,6 +249,7 @@ export class SpekoSTT extends stt.STT {
       sessionId: this.#sessionId,
       constraints: this.#constraints,
       keywords: this.#keywords,
+      ...(this.#sttLanguage !== undefined && { language: this.#sttLanguage }),
       alignedTranscript: this.#alignedTranscript,
       ...(this.#createWebSocket ? { createWebSocket: this.#createWebSocket } : {}),
       ...(this.#reconnect ? { reconnect: this.#reconnect } : {}),
@@ -285,6 +296,7 @@ interface SpekoSpeechStreamOptions {
   readonly sessionId?: string;
   readonly constraints: PipelineConstraints | undefined;
   readonly keywords: readonly string[] | undefined;
+  readonly language?: string;
   /**
    * Mirror of the parent STT's word-alignment capability. On aligned streams
    * the config frame requests interim results (the adaptive interruption
@@ -874,6 +886,9 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       }),
       ...(this.#opts.constraints !== undefined && { constraints: this.#opts.constraints }),
       ...(this.#opts.keywords !== undefined && { keywords: this.#opts.keywords }),
+      ...(this.#opts.language !== undefined && {
+        sttOptions: { language: this.#opts.language },
+      }),
       ...(this.#opts.alignedTranscript ? { interimResults: true } : {}),
     };
   }
