@@ -1,0 +1,117 @@
+name: Publish to npm
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Node 24 ships with npm 11 which supports the trusted publisher
+      # OIDC exchange. Do NOT add setup-node's `registry-url` — it writes
+      # an .npmrc with an _authToken placeholder that prevents npm from
+      # falling through to OIDC. Let npm default to the public registry.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The mirror repo has no workspace context, so pnpm's `workspace:`
+      # protocol is not installable by npm and has to be removed before
+      # `npm install`. This step ONLY strips the prefix: the range itself is
+      # whatever package.json declares.
+      #
+      # It must never re-derive the range from the registry. The previous
+      # version of this step ran, unconditionally:
+      #
+      #   npm pkg set peerDependencies.@spekoai/sdk=^$(npm view @spekoai/sdk version)
+      #
+      # A caret on a 0.x version is minor-locked, so with the SDK at 0.4.3 that
+      # published 0.1.2 with `^0.4.3` == `>=0.4.3 <0.5.0`, which EXCLUDES the
+      # current SDK 0.5.1: every documented install printed ERESOLVE and
+      # `npm ls` exited non-zero. Left alone it would have re-broken as
+      # `^0.5.1` on the next release. The supported range is a property of the
+      # adapter, not of whatever happens to be latest on the day of the tag,
+      # so package.json is the only place it is allowed to come from.
+      - name: Strip the workspace protocol from dependency ranges
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const PREFIX = "workspace:";
+          // pnpm aliases that mean "whatever the local workspace version is".
+          // They encode no range, so there is nothing to publish and nothing
+          // safe to guess.
+          const RANGELESS = new Set(["", "*", "^", "~"]);
+          // Fields that end up in the published metadata, where a wrong range
+          // is permanent for that version.
+          const PUBLISHED = ["dependencies", "peerDependencies", "optionalDependencies"];
+
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const errors = [];
+          let changed = false;
+
+          for (const field of [...PUBLISHED, "devDependencies"]) {
+            for (const [name, spec] of Object.entries(pkg[field] ?? {})) {
+              if (typeof spec !== "string" || !spec.startsWith(PREFIX)) continue;
+
+              const declared = spec.slice(PREFIX.length).trim();
+
+              if (RANGELESS.has(declared) && PUBLISHED.includes(field)) {
+                errors.push(
+                  `${field}["${name}"] is "${spec}", which declares no version range. ` +
+                    "Set an explicit range in packages/adapter-livekit/package.json, " +
+                    'e.g. "workspace:>=0.4.3 <0.6.0".',
+                );
+                continue;
+              }
+
+              // devDependencies never ship; they only have to install so the
+              // publish build can typecheck.
+              pkg[field][name] = RANGELESS.has(declared) ? "latest" : declared;
+              changed = true;
+              console.log(`${field}["${name}"]: ${spec} -> ${pkg[field][name]}`);
+            }
+          }
+
+          if (errors.length > 0) {
+            console.error(errors.join("\n"));
+            process.exit(1);
+          }
+
+          if (changed) {
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          } else {
+            console.log(`No ${PREFIX} specifiers to rewrite.`);
+          }
+          NODE
+
+      - name: Show the ranges that will be published
+        run: npm pkg get version dependencies peerDependencies
+
+      - run: npm install --no-save
+
+      - name: Build for publish
+        run: npx tsc -p tsconfig.publish.json
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            --verify-tag
