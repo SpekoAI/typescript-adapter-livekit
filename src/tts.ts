@@ -7,18 +7,47 @@ import type {
   SynthesizeStreamResult,
 } from '@spekoai/sdk';
 
-import { parseWav, pcmSampleRateFromContentType } from './audio.js';
-import { isAbortError, toFrameworkApiError } from './errors.js';
+import { createSampleRateNormalizer, parseWav, pcmSampleRateFromContentType } from './audio.js';
+import { isAbortError, SpekoAdapterError, toFrameworkApiError } from './errors.js';
 import { type Intent, validateIntent } from './intent.js';
 
 /**
- * Default output sample rate advertised to the LiveKit `AgentSession`. Speko's
- * router pins the upstream provider to 24 kHz mono PCM (Cartesia's native
- * format, ElevenLabs via `output_format=pcm_24000`). Any provider that emits
- * `audio/mpeg` is rejected — v1 ships no MP3 decoder.
+ * Default output sample rate advertised to the LiveKit `AgentSession`. Most
+ * routed providers emit 24 kHz mono PCM, but not all: the gateway's
+ * `CONTENT_TYPE` map (apps/server/src/routes/synthesize.ts) serves 48 kHz for
+ * Hume and Gradium and 16 kHz for Amazon Polly. A response at any other rate is
+ * resampled to this one rather than rejected — see
+ * {@link SpekoTTSChunkedStream}. Any provider that emits `audio/mpeg` is still
+ * rejected: v1 ships no MP3 decoder.
  */
 const DEFAULT_SAMPLE_RATE = 24_000;
 const NUM_CHANNELS = 1;
+
+/**
+ * The gateway reports the routed provider's real audio format on
+ * `X-Speko-Audio-Format` as well as `Content-Type`. The header is the
+ * authoritative field (an intermediary can rewrite `Content-Type`, and a
+ * failover changes the rate without the caller ever asking for it), so read it
+ * when the SDK surfaces it and fall back to `contentType` otherwise.
+ *
+ * The fallback is load-bearing, not defensive: `SynthesizeStreamResult` in
+ * `@spekoai/sdk` 0.4.x/0.5.x exposes only `contentType`, and this adapter
+ * supports that whole range. Since the gateway sets both fields to the same
+ * value, the fallback is exact today; the header lookup is what keeps this
+ * correct once the SDK starts surfacing it.
+ */
+function resolveResponseAudioFormat(streamed: SynthesizeStreamResult): string {
+  const source = streamed as unknown as {
+    audioFormat?: unknown;
+    headers?: Record<string, unknown>;
+  };
+  if (typeof source.audioFormat === 'string' && source.audioFormat.length > 0) {
+    return source.audioFormat;
+  }
+  const header = source.headers?.['x-speko-audio-format'];
+  if (typeof header === 'string' && header.length > 0) return header;
+  return streamed.contentType;
+}
 
 export interface SpekoTTSOptions {
   speko: Speko;
@@ -36,9 +65,10 @@ export interface SpekoTTSOptions {
    */
   instructions?: string;
   /**
-   * Output sample rate advertised to the LiveKit agent. Must match what the
-   * upstream provider actually emits, otherwise playback will be pitched.
-   * Defaults to 24000 (Cartesia Sonic default).
+   * Output sample rate advertised to the LiveKit agent. Every frame this
+   * instance emits is at this rate: a routed provider that produces a different
+   * rate (48 kHz Hume/Gradium, 16 kHz Polly) is resampled to it. Defaults to
+   * 24000, which most providers emit natively and therefore costs no resampling.
    */
   sampleRate?: number;
   /** Optional allow-list constraints. */
@@ -59,6 +89,11 @@ export interface SpekoTTSOptions {
  * or `audio/wav`. The Speko router asks every supported TTS for PCM upstream
  * (Cartesia natively, ElevenLabs via `output_format=pcm_24000`), so MP3 should
  * never reach the adapter in v1; if it does, `decodeSynthesisResult` throws.
+ *
+ * **Sample rate**: the response rate is read per request and resampled to the
+ * declared {@link SpekoTTSOptions.sampleRate}, so routing to a 48 kHz or 16 kHz
+ * provider — or failing over onto one mid-call, which the caller never sees — is
+ * handled rather than fatal.
  */
 export class SpekoTTS extends tts.TTS {
   label = 'speko.TTS';
@@ -245,8 +280,11 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
     }
 
     const t1 = Date.now();
-    if (streamed.contentType.toLowerCase().startsWith('audio/pcm')) {
-      await this.#streamPcmResult(streamed, requestId, t0, t1);
+    // Branch and rate-detect off the SAME resolved format string so the two can
+    // never disagree about what arrived.
+    const audioFormat = resolveResponseAudioFormat(streamed);
+    if (audioFormat.toLowerCase().startsWith('audio/pcm')) {
+      await this.#streamPcmResult(streamed, audioFormat, requestId, t0, t1);
       return;
     }
 
@@ -271,32 +309,33 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
       '[SpekoTTS] synthesize:response',
     );
 
-    const { pcm, sampleRate, channels } = decodeSynthesisResult(result);
+    const { pcm, sampleRate, channels } = decodeSynthesisResult(result, audioFormat);
 
-    if (sampleRate !== this.#expectedSampleRate) {
-      logger.error(
-        {
-          requestId,
-          actualSampleRate: sampleRate,
-          expectedSampleRate: this.#expectedSampleRate,
-        },
-        '[SpekoTTS] synthesize:sample-rate-mismatch',
-      );
-      // Deterministic routing misconfig — retrying the same request hits the same
-      // provider at the same wrong rate. Non-retryable so the framework fails fast
-      // rather than burning maxRetry attempts before the inevitable close.
-      throw new APIError(
-        `SpekoTTS: provider returned audio at ${sampleRate} Hz but the TTS was ` +
-          `configured for ${this.#expectedSampleRate} Hz. Either set ` +
-          `\`sampleRate: ${sampleRate}\` on SpekoTTS or pin the Speko router to a ` +
-          `provider that matches the expected rate.`,
-        { retryable: false },
-      );
-    }
-
+    // Frame at the rate the bytes are actually in, then normalize to the rate
+    // this instance advertises. Historically a difference threw here, which
+    // aborted the utterance for every 48 kHz (Hume, Gradium) or 16 kHz (Polly)
+    // route and for any invisible failover onto one.
     const samplesPerFrame = Math.round(sampleRate / 50);
     const bstream = new AudioByteStream(sampleRate, channels, samplesPerFrame);
-    const frames = [...bstream.write(pcm), ...bstream.flush()];
+    const decoded = [...bstream.write(pcm), ...bstream.flush()];
+    const normalizer = createSampleRateNormalizer(sampleRate, this.#expectedSampleRate, channels);
+    let frames: AudioFrame[];
+    try {
+      if (normalizer.resampling) {
+        logger.info(
+          {
+            requestId,
+            responseSampleRate: sampleRate,
+            declaredSampleRate: this.#expectedSampleRate,
+            provider: result.provider,
+          },
+          '[SpekoTTS] synthesize:resampling',
+        );
+      }
+      frames = [...decoded.flatMap((frame) => normalizer.push(frame)), ...normalizer.flush()];
+    } finally {
+      normalizer.close();
+    }
 
     if (frames.length === 0) {
       logger.error({ requestId }, '[SpekoTTS] synthesize:empty-frames');
@@ -309,7 +348,8 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
       {
         requestId,
         frameCount: frames.length,
-        sampleRate,
+        sampleRate: this.#expectedSampleRate,
+        responseSampleRate: sampleRate,
         channels,
         pcmBytes: pcm.byteLength,
         durationMs: Math.round((pcm.byteLength / 2 / sampleRate) * 1000),
@@ -325,82 +365,107 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
 
   async #streamPcmResult(
     streamed: SynthesizeStreamResult,
+    audioFormat: string,
     requestId: string,
     startedAt: number,
     responseAt: number,
   ): Promise<void> {
     const logger = log();
-    const sampleRate = pcmSampleRateFromContentType(
-      streamed.contentType.toLowerCase(),
+    const responseSampleRate = pcmSampleRateFromContentType(
+      audioFormat.toLowerCase(),
       this.#expectedSampleRate,
     );
-    if (sampleRate !== this.#expectedSampleRate) {
-      // Log a greppable breadcrumb BEFORE throwing — on the streaming path the
-      // framework wraps this error and (historically) rendered it as an empty
-      // object, so without this line the cause was invisible in worker logs.
-      logger.error(
-        { requestId, actualSampleRate: sampleRate, expectedSampleRate: this.#expectedSampleRate },
-        '[SpekoTTS] synthesize:sample-rate-mismatch (streaming)',
-      );
-      throw new APIError(
-        `SpekoTTS: provider returned audio at ${sampleRate} Hz but the TTS was ` +
-          `configured for ${this.#expectedSampleRate} Hz.`,
-        { retryable: false },
+    // Frame the bytes at the rate they are actually in, then normalize to the
+    // rate this instance advertises. A difference used to abort the utterance,
+    // which killed every 48 kHz (Hume, Gradium) and 16 kHz (Polly) route.
+    const normalizer = createSampleRateNormalizer(
+      responseSampleRate,
+      this.#expectedSampleRate,
+      NUM_CHANNELS,
+    );
+    if (normalizer.resampling) {
+      logger.info(
+        {
+          requestId,
+          responseSampleRate,
+          declaredSampleRate: this.#expectedSampleRate,
+          provider: streamed.provider,
+        },
+        '[SpekoTTS] synthesize:resampling (streaming)',
       );
     }
 
-    const samplesPerFrame = Math.round(sampleRate / 50);
-    const bstream = new AudioByteStream(sampleRate, NUM_CHANNELS, samplesPerFrame);
-    // Each frame is 20ms of audio (sampleRate / 50). Providers (Cartesia, EL) emit
-    // 4-5x faster than realtime, so pushing every frame the instant it arrives floods
-    // the playout pipeline with seconds of audio ahead — which keeps draining after a
-    // barge-in (server yields in ~70ms but the buffered audio plays on). Pace the push
-    // to stay at most LOOKAHEAD_MS ahead of realtime so a barge-in has ~nothing to drain.
-    // Starvation-safe: we only ever DELAY when ahead, never when behind, so TTFB and
-    // under-realtime providers are unaffected.
-    const FRAME_MS = 20;
+    const samplesPerFrame = Math.round(responseSampleRate / 50);
+    const bstream = new AudioByteStream(responseSampleRate, NUM_CHANNELS, samplesPerFrame);
+    // Providers (Cartesia, EL) emit 4-5x faster than realtime, so pushing every
+    // frame the instant it arrives floods the playout pipeline with seconds of
+    // audio ahead — which keeps draining after a barge-in (server yields in ~70ms
+    // but the buffered audio plays on). Pace the push to stay at most
+    // LOOKAHEAD_MS ahead of realtime so a barge-in has ~nothing to drain.
+    // Starvation-safe: we only ever DELAY when ahead, never when behind, so TTFB
+    // and under-realtime providers are unaffected.
     const LOOKAHEAD_MS = 150;
     let pending: AudioFrame | undefined;
     let pushed = 0;
     let bytes = 0;
+    // Playout time already queued. Accumulated from each frame's real duration
+    // rather than `pushed * 20ms` because a resampled frame is not necessarily
+    // 20ms long; at equal rates the two are identical.
+    let queuedMs = 0;
     let firstFrameMs: number | undefined;
     const playoutStart = Date.now();
     const flush = async (final: boolean) => {
-      if (!pending) return;
-      // How far the next frame's scheduled playout time is ahead of realtime.
-      const aheadMs = pushed * FRAME_MS - (Date.now() - playoutStart);
+      const frame = pending;
+      if (!frame) return;
+      // How far the queued audio's playout runs ahead of realtime.
+      const aheadMs = queuedMs - (Date.now() - playoutStart);
       if (aheadMs > LOOKAHEAD_MS) {
         await new Promise((resolve) => setTimeout(resolve, aheadMs - LOOKAHEAD_MS));
       }
       this.queue.put({
         requestId,
         segmentId: requestId,
-        frame: pending,
+        frame,
         final,
       });
       pending = undefined;
       pushed += 1;
+      queuedMs += (frame.samplesPerChannel / frame.sampleRate) * 1000;
       firstFrameMs ??= Date.now() - startedAt;
     };
-
-    for await (const chunk of streamed) {
-      bytes += chunk.byteLength;
-      for (const frame of bstream.write(chunk)) {
-        await flush(false);
-        pending = frame;
-      }
-    }
-    for (const frame of bstream.flush()) {
+    // One frame is always held back so the last one can be marked `final`.
+    const offer = async (frame: AudioFrame) => {
       await flush(false);
       pending = frame;
+    };
+
+    try {
+      for await (const chunk of streamed) {
+        bytes += chunk.byteLength;
+        for (const frame of bstream.write(chunk)) {
+          for (const out of normalizer.push(frame)) await offer(out);
+        }
+      }
+      for (const frame of bstream.flush()) {
+        for (const out of normalizer.push(frame)) await offer(out);
+      }
+      for (const out of normalizer.flush()) await offer(out);
+      await flush(true);
+    } finally {
+      normalizer.close();
     }
-    await flush(true);
 
     if (pushed === 0) {
-      logger.error({ requestId }, '[SpekoTTS] synthesize:empty-frames');
+      logger.error({ requestId, responseSampleRate, bytes }, '[SpekoTTS] synthesize:empty-frames');
       // Empty audio is a transient provider glitch — retryable so the framework
       // re-requests (and the router can fail over) instead of closing the call.
-      throw new APIError('SpekoTTS: provider returned empty audio', { retryable: true });
+      // Also reachable when a very short utterance is entirely swallowed by the
+      // resampler's warm-up; from the caller's seat that is the same outage.
+      throw new APIError(
+        `SpekoTTS: provider returned empty audio (responseRate=${responseSampleRate}, ` +
+          `declaredRate=${this.#expectedSampleRate}, bytes=${bytes})`,
+        { retryable: true },
+      );
     }
 
     logger.info(
@@ -411,6 +476,8 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
         totalElapsedMs: Date.now() - startedAt,
         frameCount: pushed,
         pcmBytes: bytes,
+        sampleRate: this.#expectedSampleRate,
+        responseSampleRate,
         provider: streamed.provider,
       },
       '[SpekoTTS] synthesize:streamed-pcm-done',
@@ -475,14 +542,25 @@ function concatChunks(chunks: readonly Uint8Array[]): Uint8Array {
  *   half speed with L/R mixed.
  * - `audio/mpeg` or anything else → throws, documented v1 limitation.
  *
+ * The returned `sampleRate` is whatever the response declares; the caller is
+ * responsible for normalizing it to the rate the TTS advertises.
+ *
+ * @param audioFormat Optional override for the format string to branch on,
+ *   normally the response's `X-Speko-Audio-Format`. Defaults to
+ *   `result.contentType`.
+ *
  * Exported for unit testing.
  */
-export function decodeSynthesisResult(result: SynthesizeResult): {
+export function decodeSynthesisResult(
+  result: SynthesizeResult,
+  audioFormat?: string,
+): {
   pcm: Uint8Array;
   sampleRate: number;
   channels: number;
 } {
-  const contentType = result.contentType.toLowerCase();
+  const format = audioFormat ?? result.contentType;
+  const contentType = format.toLowerCase();
 
   if (contentType.startsWith('audio/pcm')) {
     return {
@@ -495,26 +573,29 @@ export function decodeSynthesisResult(result: SynthesizeResult): {
   if (contentType.startsWith('audio/wav') || contentType.startsWith('audio/x-wav')) {
     const { pcm, sampleRate, channels } = parseWav(result.audio);
     if (channels !== NUM_CHANNELS) {
-      throw new Error(
+      throw new SpekoAdapterError(
         `SpekoTTS: WAV response has ${channels} channels but the adapter is ` +
           `configured for ${NUM_CHANNELS}. Configure the Speko router to return ` +
           `mono audio, or pin a mono-only provider.`,
+        'UNSUPPORTED_CHANNELS',
       );
     }
     return { pcm, sampleRate, channels };
   }
 
   if (contentType.startsWith('audio/mpeg')) {
-    throw new Error(
-      `SpekoTTS: received ${result.contentType} from provider "${result.provider}". ` +
+    throw new SpekoAdapterError(
+      `SpekoTTS: received ${format} from provider "${result.provider}". ` +
         'v1 only supports raw PCM (`audio/pcm;rate=NNNN`) and WAV (`audio/wav`). ' +
         'Configure your Speko routing intent so Cartesia is preferred, or pin the ' +
         'TTS provider explicitly.',
+      'UNSUPPORTED_CONTENT_TYPE',
     );
   }
 
-  throw new Error(
-    `SpekoTTS: unsupported content type "${result.contentType}" from provider ` +
+  throw new SpekoAdapterError(
+    `SpekoTTS: unsupported content type "${format}" from provider ` +
       `"${result.provider}". Expected audio/pcm, audio/wav, or (in future) audio/mpeg.`,
+    'UNSUPPORTED_CONTENT_TYPE',
   );
 }

@@ -111,6 +111,10 @@ const wrappedTTS = new tts.StreamAdapter(
   and `audio/wav`. It throws on `audio/mpeg` (ElevenLabs MP3) — for v1, pick
   a routing intent that prefers Cartesia, or ask Speko to normalise output
   to PCM server-side before you upgrade.
+- **TTS output sample rate.** Whatever rate the routed provider produces (24 kHz
+  for most, 48 kHz for Hume and Gradium, 16 kHz for Amazon Polly) is resampled
+  to the `sampleRate` the TTS advertises, so the declared rate is always what
+  LiveKit receives. Matching rates cost nothing.
 - **STT input format.** Mono PCM16. The adapter encodes whatever sample rate
   the LiveKit `AudioFrame` carries into the WAV header it uploads; Speko / the
   downstream STT providers handle resampling.

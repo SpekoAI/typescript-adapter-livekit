@@ -1,7 +1,12 @@
 import { AudioFrame } from '@livekit/rtc-node';
 import { describe, expect, it } from 'vitest';
 
-import { framesToWav, parseWav, pcmSampleRateFromContentType } from './audio.js';
+import {
+  createSampleRateNormalizer,
+  framesToWav,
+  parseWav,
+  pcmSampleRateFromContentType,
+} from './audio.js';
 
 function makeFrame(samples: number[], sampleRate = 16000, channels = 1): AudioFrame {
   const int16 = new Int16Array(samples);
@@ -69,5 +74,59 @@ describe('pcmSampleRateFromContentType', () => {
     ['audio/pcm;rate=44100;foo=bar', 16000, 44100],
   ])('parses %s with fallback %i → %i', (contentType, fallback, expected) => {
     expect(pcmSampleRateFromContentType(contentType, fallback)).toBe(expected);
+  });
+});
+
+describe('createSampleRateNormalizer', () => {
+  function silence(sampleRate: number, durationMs: number): AudioFrame {
+    const samples = Math.round((sampleRate * durationMs) / 1000);
+    return new AudioFrame(new Int16Array(samples), sampleRate, 1, samples);
+  }
+
+  it('is an identity pass-through when the rates already match', () => {
+    const normalizer = createSampleRateNormalizer(24000, 24000, 1);
+    const frame = silence(24000, 20);
+
+    expect(normalizer.resampling).toBe(false);
+    // Same instance: the common 24 kHz path must not copy or reframe audio.
+    expect(normalizer.push(frame)).toEqual([frame]);
+    expect(normalizer.flush()).toEqual([]);
+    normalizer.close();
+  });
+
+  it('halves the sample count going 48 kHz -> 24 kHz and retags every frame', () => {
+    const normalizer = createSampleRateNormalizer(48000, 24000, 1);
+    expect(normalizer.resampling).toBe(true);
+
+    const out: AudioFrame[] = [];
+    for (let i = 0; i < 10; i += 1) out.push(...normalizer.push(silence(48000, 20)));
+    out.push(...normalizer.flush());
+    normalizer.close();
+
+    expect(out.length).toBeGreaterThan(0);
+    expect(out.every((frame) => frame.sampleRate === 24000)).toBe(true);
+    // 200ms in at 48k = 9600 samples; 200ms out at 24k = 4800.
+    expect(out.reduce((sum, frame) => sum + frame.samplesPerChannel, 0)).toBe(4800);
+  });
+
+  it('grows the sample count going 16 kHz -> 24 kHz', () => {
+    const normalizer = createSampleRateNormalizer(16000, 24000, 1);
+    const out: AudioFrame[] = [];
+    for (let i = 0; i < 10; i += 1) out.push(...normalizer.push(silence(16000, 20)));
+    out.push(...normalizer.flush());
+    normalizer.close();
+
+    expect(out.every((frame) => frame.sampleRate === 24000)).toBe(true);
+    expect(out.reduce((sum, frame) => sum + frame.samplesPerChannel, 0)).toBe(4800);
+  });
+
+  it('close() is idempotent and stops producing frames', () => {
+    // Called from a `finally`, so a double close must not throw on the native handle.
+    const normalizer = createSampleRateNormalizer(48000, 24000, 1);
+    normalizer.push(silence(48000, 20));
+    normalizer.close();
+    expect(() => normalizer.close()).not.toThrow();
+    expect(normalizer.push(silence(48000, 20))).toEqual([]);
+    expect(normalizer.flush()).toEqual([]);
   });
 });

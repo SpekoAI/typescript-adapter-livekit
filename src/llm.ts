@@ -8,19 +8,14 @@ import type {
   ChatMessage as SpekoChatMessage,
 } from '@spekoai/sdk';
 
-import { isAbortError, toFrameworkApiError } from './errors.js';
+import { isAbortError, SpekoAdapterError, toFrameworkApiError } from './errors.js';
 import { type Intent, validateIntent } from './intent.js';
 import { mergeTools, RegisteredToolsLoader } from './registered-tools.js';
 
-export class SpekoAdapterError extends Error {
-  readonly code: string;
-
-  constructor(message: string, code: string) {
-    super(message);
-    this.name = 'SpekoAdapterError';
-    this.code = code;
-  }
-}
+// Defined in errors.ts (so the audio/TTS paths can raise coded faults without
+// pulling in this module) and re-exported here to keep the import path that
+// callers and `index.ts` already use.
+export { SpekoAdapterError };
 
 export interface SpekoLLMGenerationInfo {
   epoch: number;
