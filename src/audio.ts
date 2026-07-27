@@ -1,5 +1,6 @@
 import type { AudioBuffer } from '@livekit/agents';
-import { AudioFrame, AudioResampler, combineAudioFrames } from '@livekit/rtc-node';
+import type { AudioFrame } from '@livekit/rtc-node';
+import { AudioResampler, combineAudioFrames } from '@livekit/rtc-node';
 
 import { SpekoAdapterError } from './errors.js';
 
@@ -189,22 +190,4 @@ function readAscii(buf: Uint8Array, offset: number, length: number): string {
     out += String.fromCharCode(buf[offset + i] ?? 0);
   }
   return out;
-}
-
-/**
- * Build a canned `AudioFrame` for tests. Exported for use from spec files —
- * the adapter's runtime code never calls this directly.
- */
-export function createTestFrame(options: {
-  samples: Int16Array;
-  sampleRate: number;
-  channels?: number;
-}): AudioFrame {
-  const channels = options.channels ?? 1;
-  return new AudioFrame(
-    options.samples,
-    options.sampleRate,
-    channels,
-    options.samples.length / channels,
-  );
 }

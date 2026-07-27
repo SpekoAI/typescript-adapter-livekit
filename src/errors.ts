@@ -3,7 +3,7 @@ import { APIConnectionError, APIError, APIStatusError, APITimeoutError } from '@
 /**
  * A coded adapter/gateway fault. The `code` is what {@link toFrameworkApiError}
  * classifies on, so every throw on a data path (STT recognize, LLM complete,
- * TTS synthesize/decode) should carry one rather than being a bare `Error` — a
+ * TTS synthesize/decode) should carry one rather than being a bare `Error` - a
  * bare `Error` can only be guessed at, and the guess is "retryable".
  *
  * Lives here rather than in `llm.ts` so the audio/TTS paths can raise coded
@@ -25,7 +25,7 @@ export class SpekoAdapterError extends Error {
  * framework aborts an in-flight STT/LLM/TTS request the instant it commits a
  * new user turn (a normal barge-in). That cancellation surfaces as an
  * `AbortError` (or a generic error while `abortSignal.aborted` is set) and MUST
- * NOT be treated as a provider failure — otherwise every interrupted reply
+ * NOT be treated as a provider failure - otherwise every interrupted reply
  * emits a spurious `recoverable:false` error and, after a few back-to-back
  * barge-ins, closes the live call.
  */
@@ -40,29 +40,29 @@ export function isAbortError(err: unknown): boolean {
 }
 
 // Adapter/gateway fault codes that a retry (or router failover) can recover
-// from — a transient blip, not a permanent misconfiguration.
+// from - a transient blip, not a permanent misconfiguration.
 const RETRYABLE_FAULT_CODES = new Set([
-  'STREAM_ENDED', // SSE/WS ended without a terminal `done` — re-issue the turn.
-  'EMPTY_COMPLETION', // router returned blank — re-roll (may pick another provider).
+  'STREAM_ENDED', // SSE/WS ended without a terminal `done` - re-issue the turn.
+  'EMPTY_COMPLETION', // router returned blank - re-roll (may pick another provider).
   'EMPTY_BODY', // empty HTTP body from the gateway.
-  'EMPTY_AUDIO', // TTS returned zero frames — provider glitch.
-  'MALFORMED_AUDIO', // truncated/garbled audio payload — a retry can fail over.
-  'RATE_LIMITED', // 429 — back off and retry.
+  'EMPTY_AUDIO', // TTS returned zero frames - provider glitch.
+  'MALFORMED_AUDIO', // truncated/garbled audio payload - a retry can fail over.
+  'RATE_LIMITED', // 429 - back off and retry.
   'SERVER_ERROR', // 5xx upstream.
   'UPSTREAM_ERROR', // router-reported upstream provider fault.
   'WS_ERROR', // transient socket fault.
 ]);
 
-// Deterministic faults that retrying cannot fix — fail fast and deliberately.
+// Deterministic faults that retrying cannot fix - fail fast and deliberately.
 const PERMANENT_FAULT_CODES = new Set([
-  'INVALID_CONTEXT', // ChatContext produced no convertible messages — a code bug.
+  'INVALID_CONTEXT', // ChatContext produced no convertible messages - a code bug.
   // Gateway-reported rate conflict. The adapter no longer raises this itself:
   // it resamples a differing response rate instead (see tts.ts).
   'SAMPLE_RATE_MISMATCH',
-  'UNSUPPORTED_CONTENT_TYPE', // non-PCM/WAV audio — a routing misconfig.
-  'UNSUPPORTED_AUDIO_FORMAT', // WAV that is not 16-bit PCM — a provider misconfig.
+  'UNSUPPORTED_CONTENT_TYPE', // non-PCM/WAV audio - a routing misconfig.
+  'UNSUPPORTED_AUDIO_FORMAT', // WAV that is not 16-bit PCM - a provider misconfig.
   'UNSUPPORTED_CHANNELS', // stereo where mono is required.
-  'AUTH_ERROR', // 401/403 — a credential problem.
+  'AUTH_ERROR', // 401/403 - a credential problem.
   'UNAUTHORIZED',
   'INVALID_REQUEST', // 400-class client error.
 ]);
@@ -158,7 +158,7 @@ function isTimeout(chain: readonly unknown[]): boolean {
 /**
  * Structural `APIError` detection, used only to re-wrap a foreign copy. With
  * `@livekit/agents` as a peer dependency a tree can end up with two copies, and
- * an error thrown by copy A fails `instanceof` against copy B — which is exactly
+ * an error thrown by copy A fails `instanceof` against copy B - which is exactly
  * the check the framework's retry loop performs. Re-wrapping into the copy THIS
  * module imported (the same one the caller's framework uses) keeps the retry
  * decision instead of silently losing it.
@@ -175,8 +175,8 @@ function apiErrorLike(err: unknown): { message: string; retryable: boolean } | u
 
 /**
  * Stamp the gateway's fault code (and HTTP status) onto the message. The
- * framework logs `error.message` in the two places that matter most — the retry
- * warning and the `recoverable:false` session error — so a message without the
+ * framework logs `error.message` in the two places that matter most - the retry
+ * warning and the `recoverable:false` session error - so a message without the
  * code forces a log dive to learn whether a dead turn was a 429, a blank
  * completion or an expired key.
  */
@@ -203,7 +203,7 @@ function faultBody(code: string | undefined, status: number | undefined): object
  * so the STT/LLM/TTS retry loop engages.
  *
  * Why this boundary exists: the framework only retries an error that is
- * `instanceof APIError` AND has `retryable:true` — every run loop in
+ * `instanceof APIError` AND has `retryable:true` - every run loop in
  * `@livekit/agents` (`stt/stt.js`, `llm/llm.js`, `tts/tts.js`) reads
  * `if (error instanceof APIError) { ...retry... } else { emitError({recoverable:false}); throw }`.
  * A plain `Error` takes the `else` branch and is reported to the `AgentSession`
@@ -214,19 +214,19 @@ function faultBody(code: string | undefined, status: number | undefined): object
  * the call instantly.
  *
  * Classification, in order:
- *  1. already an `APIError` from our copy of the framework → returned unchanged
+ *  1. already an `APIError` from our copy of the framework -> returned unchanged
  *     (preserves an upstream-chosen `retryable`, including a deliberate `false`).
- *  2. an `APIError` from a DIFFERENT copy of `@livekit/agents` → re-wrapped into
+ *  2. an `APIError` from a DIFFERENT copy of `@livekit/agents` -> re-wrapped into
  *     ours, preserving `retryable`, so the caller's `instanceof` still matches.
  *  3. a timeout (`AbortSignal.timeout`, undici `UND_ERR_*_TIMEOUT`, `ETIMEDOUT`,
- *     including when buried in a `fetch` error's `cause`) → `APITimeoutError`,
+ *     including when buried in a `fetch` error's `cause`) -> `APITimeoutError`,
  *     which is retryable.
- *  4. a known-permanent fault code → non-retryable, so the framework fails fast
+ *  4. a known-permanent fault code -> non-retryable, so the framework fails fast
  *     rather than burning `maxRetry` attempts on a deterministic misconfig.
- *  5. an HTTP status → `APIStatusError`, whose own classification retries
+ *  5. an HTTP status -> `APIStatusError`, whose own classification retries
  *     408/429/5xx (and any non-4xx) and fails fast on 400/401/404/422.
- *  6. a known-retryable fault code → retryable `APIError`.
- *  7. anything else (a `fetch` `TypeError`, `ECONNRESET`, an unknown throw) → a
+ *  6. a known-retryable fault code -> retryable `APIError`.
+ *  7. anything else (a `fetch` `TypeError`, `ECONNRESET`, an unknown throw) -> a
  *     retryable `APIConnectionError`. Defaulting the unknown case to retryable
  *     costs at most a few retries for a genuine bug but saves every transient
  *     network fault from killing the call.
@@ -251,7 +251,7 @@ export function toFrameworkApiError(err: unknown): APIError {
 
   if (code !== undefined && PERMANENT_FAULT_CODES.has(code)) {
     // Keep the status-bearing shape when there is one (an auth failure should
-    // still read as an APIStatusError) but pin retryable ourselves —
+    // still read as an APIStatusError) but pin retryable ourselves -
     // APIStatusError only ever forces `false`, never `true`, so this holds.
     return status !== undefined
       ? new APIStatusError({ message, options: { statusCode: status, retryable: false, body } })

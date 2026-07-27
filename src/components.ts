@@ -47,14 +47,19 @@ export interface CreateSpekoComponentsOptions {
   tools?: ChatTool[];
   /**
    * Optional TTS tuning (output sample rate, speed, speaking-style instruction)
-   * forwarded to the TTS. `instructions` sets the initial value; callers can
-   * update it later via `components.ttsProvider.setInstructions(...)`.
+   * forwarded to the TTS. These are fixed for the lifetime of the returned
+   * bundle: there is no post-construction setter, and the `SpekoTTS` inside
+   * `components.tts` is not reachable through the returned object. To change
+   * them mid-session, build a new {@link SpekoTTS}, wrap it in a
+   * `tts.StreamAdapter`, and hand a new `voice.Agent` to
+   * `session.updateAgent()`.
    */
   ttsOptions?: Pick<SpekoTTSOptions, 'sampleRate' | 'speed' | 'instructions'>;
   /**
-   * Optional STT tuning. `keywords` provides domain-vocabulary biasing and
-   * `language` overrides only the underlying provider's stream language; the
-   * routing intent remains unchanged. Forwarded via `speko.transcribe`.
+   * Optional STT tuning. `keywords` provides domain-vocabulary biasing (the
+   * gateway caps it at 200 terms and rejects a longer list) and `language`
+   * overrides only the underlying provider's stream language; the routing
+   * intent remains unchanged. Forwarded via `speko.transcribe`.
    */
   sttOptions?: Pick<SpekoSTTOptions, 'keywords' | 'language'>;
   /**
@@ -62,12 +67,12 @@ export interface CreateSpekoComponentsOptions {
    * (`GET /v1/transcribe/stream`) instead of the VAD-bounded batch upload path.
    * Defaults to `true`.
    *
-   *   - `true`  → `components.stt` is a streaming {@link SpekoSTT} dropped
+   *   - `true`  -> `components.stt` is a streaming {@link SpekoSTT} dropped
    *               straight into the session; transcripts arrive incrementally
    *               (interim + final) as the provider produces them. The session
    *               still uses the {@link vad} you pass for turn detection.
    *               Requires {@link sttBaseUrl} and {@link sttApiKey}.
-   *   - `false` → `components.stt` is the original `stt.StreamAdapter` wrapping
+   *   - `false` -> `components.stt` is the original `stt.StreamAdapter` wrapping
    *               a batch SpekoSTT (one VAD-bounded WAV per turn). Unchanged.
    */
   sttStreaming?: boolean;
@@ -117,16 +122,23 @@ export interface SpekoComponents {
   stt: stt.STT;
   /** LLM that calls Speko's `/v1/complete`. */
   llm: SpekoLLM;
-  /** TTS wrapped with `tts.StreamAdapter(…, sentenceTokenizer)`. */
+  /** TTS wrapped with `tts.StreamAdapter(..., sentenceTokenizer)`. */
   tts: tts.StreamAdapter;
 }
 
 /**
  * Build a `{ stt, llm, tts }` bundle ready to slot into a LiveKit
- * `voice.AgentSession`. The STT and TTS are wrapped with the framework's
- * `StreamAdapter` helpers so that Speko's streaming REST proxy can participate in a
- * streaming pipeline: STT+VAD buffers utterances turn-by-turn; TTS splits
- * completion text by sentence before each `/v1/synthesize` call.
+ * `voice.AgentSession`. `tts` is always wrapped with the framework's
+ * `tts.StreamAdapter` + a sentence tokenizer, so completion text is split by
+ * sentence before each `/v1/synthesize` call.
+ *
+ * `stt` defaults to the native streaming WebSocket
+ * (`GET /v1/transcribe/stream`), which needs the proxy URL and API key threaded
+ * explicitly ({@link CreateSpekoComponentsOptions.sttBaseUrl} and
+ * {@link CreateSpekoComponentsOptions.sttApiKey}) because the `Speko` client keeps
+ * both private. Omitting them throws. Set
+ * {@link CreateSpekoComponentsOptions.sttStreaming} to `false` for the
+ * VAD-bounded batch path wrapped in `stt.StreamAdapter`, which needs neither.
  *
  * @example
  * ```ts
@@ -135,18 +147,24 @@ export interface SpekoComponents {
  * import { Speko } from '@spekoai/sdk';
  * import { createSpekoComponents } from '@spekoai/adapter-livekit';
  *
+ * const SPEKO_API_KEY = process.env.SPEKO_API_KEY!;
+ * const SPEKO_BASE_URL = process.env.SPEKO_BASE_URL ?? 'https://api.speko.dev';
+ *
  * export default defineAgent({
  *   prewarm: async (proc) => {
  *     proc.userData.vad = await silero.VAD.load();
  *   },
  *   entry: async (ctx) => {
- *     const speko = new Speko({ apiKey: process.env.SPEKO_API_KEY! });
+ *     const speko = new Speko({ apiKey: SPEKO_API_KEY, baseUrl: SPEKO_BASE_URL });
+ *     const vad = ctx.proc.userData.vad as silero.VAD;
  *     const { stt, llm, tts } = createSpekoComponents({
  *       speko,
+ *       vad,
  *       intent: { language: 'en-US' },
- *       vad: ctx.proc.userData.vad,
+ *       sttBaseUrl: SPEKO_BASE_URL,
+ *       sttApiKey: SPEKO_API_KEY,
  *     });
- *     const session = new voice.AgentSession({ vad: ctx.proc.userData.vad, stt, llm, tts });
+ *     const session = new voice.AgentSession({ vad, stt, llm, tts });
  *     await session.start({ agent: new voice.Agent({ instructions: 'Be helpful.' }), room: ctx.room });
  *     await ctx.connect();
  *   },
@@ -157,17 +175,18 @@ export function createSpekoComponents(options: CreateSpekoComponentsOptions): Sp
   const sttStreaming = options.sttStreaming ?? true;
   if (sttStreaming && (!options.sttBaseUrl || !options.sttApiKey)) {
     throw new Error(
-      'createSpekoComponents: sttStreaming (the default) requires sttBaseUrl and sttApiKey — ' +
-        'pass both, or set sttStreaming: false for the batch path.',
+      'createSpekoComponents: sttStreaming (the default) requires sttBaseUrl and sttApiKey. ' +
+        "Pass both (e.g. sttBaseUrl: 'https://api.speko.dev', sttApiKey: process.env.SPEKO_API_KEY), " +
+        'or set sttStreaming: false to use the VAD-bounded batch path.',
     );
   }
   // alignedTranscript (word timestamps) may only be declared when we can
-  // guarantee the routed provider actually emits words — capabilities are read
+  // guarantee the routed provider actually emits words - capabilities are read
   // STATICALLY by LiveKit before routing, so claiming 'word' for a provider
   // that won't deliver would feed the adaptive interruption detector empty
   // arrays. We only know the provider for certain when constraints pin exactly
   // one, and only the WORD_TIMESTAMP_STT_PROVIDERS emit word timings.
-  // Pins may be bare ("deepgram") or model-qualified ("deepgram:nova-3" — the
+  // Pins may be bare ("deepgram") or model-qualified ("deepgram:nova-3" - the
   // dashboard always stores the qualified form), so compare the provider
   // prefix only.
   const pinnedStt = options.constraints?.allowedProviders?.stt;

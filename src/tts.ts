@@ -16,7 +16,7 @@ import { type Intent, validateIntent } from './intent.js';
  * routed providers emit 24 kHz mono PCM, but not all: the gateway's
  * `CONTENT_TYPE` map (apps/server/src/routes/synthesize.ts) serves 48 kHz for
  * Hume and Gradium and 16 kHz for Amazon Polly. A response at any other rate is
- * resampled to this one rather than rejected — see
+ * resampled to this one rather than rejected - see
  * {@link SpekoTTSChunkedStream}. Any provider that emits `audio/mpeg` is still
  * rejected: v1 ships no MP3 decoder.
  */
@@ -92,7 +92,7 @@ export interface SpekoTTSOptions {
  *
  * **Sample rate**: the response rate is read per request and resampled to the
  * declared {@link SpekoTTSOptions.sampleRate}, so routing to a 48 kHz or 16 kHz
- * provider — or failing over onto one mid-call, which the caller never sees — is
+ * provider - or failing over onto one mid-call, which the caller never sees - is
  * handled rather than fatal.
  */
 export class SpekoTTS extends tts.TTS {
@@ -201,7 +201,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
     try {
       await this.#synthesize();
     } catch (err) {
-      // A barge-in aborts the in-flight synthesis mid-stream — that is a normal
+      // A barge-in aborts the in-flight synthesis mid-stream - that is a normal
       // user action, not a provider fault. Returning (not throwing) prevents the
       // framework from emitting a spurious recoverable:false TTS error that,
       // after a few back-to-back interruptions, would exhaust the session's
@@ -258,24 +258,25 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
           ...(this.#instructions !== undefined && { instructions: this.#instructions }),
           ...(this.#constraints !== undefined && { constraints: this.#constraints }),
           // Voice agents speak LLM output, so always request spoken-form
-          // normalization (markdown/number scrub) — the deterministic safety net
+          // normalization (markdown/number scrub) - the deterministic safety net
           // beneath the voice directive. Server kill-switch: SPEKO_SPOKEN_FORM_ENABLED=false.
           spokenForm: true,
         },
         this.abortSignal,
       );
     } catch (err) {
-      // Let the run() wrapper swallow a barge-in abort silently — logging it as
+      // Let the run() wrapper swallow a barge-in abort silently - logging it as
       // an error would be misleading noise (a normal interruption, not a fault).
-      if (this.abortSignal?.aborted || isAbortError(err)) throw err;
-      logger.error(
-        {
-          requestId,
-          elapsedMs: Date.now() - t0,
-          error: err instanceof Error ? err.message : String(err),
-        },
-        '[SpekoTTS] synthesize:error',
-      );
+      if (!this.abortSignal?.aborted && !isAbortError(err)) {
+        logger.error(
+          {
+            requestId,
+            elapsedMs: Date.now() - t0,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          '[SpekoTTS] synthesize:error',
+        );
+      }
       throw err;
     }
 
@@ -339,7 +340,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
 
     if (frames.length === 0) {
       logger.error({ requestId }, '[SpekoTTS] synthesize:empty-frames');
-      // Empty audio is a transient provider glitch — retryable so the framework
+      // Empty audio is a transient provider glitch - retryable so the framework
       // re-requests (and the router can fail over) instead of closing the call.
       throw new APIError('SpekoTTS: provider returned empty audio', { retryable: true });
     }
@@ -399,7 +400,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
     const bstream = new AudioByteStream(responseSampleRate, NUM_CHANNELS, samplesPerFrame);
     // Providers (Cartesia, EL) emit 4-5x faster than realtime, so pushing every
     // frame the instant it arrives floods the playout pipeline with seconds of
-    // audio ahead — which keeps draining after a barge-in (server yields in ~70ms
+    // audio ahead - which keeps draining after a barge-in (server yields in ~70ms
     // but the buffered audio plays on). Pace the push to stay at most
     // LOOKAHEAD_MS ahead of realtime so a barge-in has ~nothing to drain.
     // Starvation-safe: we only ever DELAY when ahead, never when behind, so TTFB
@@ -457,7 +458,7 @@ export class SpekoTTSChunkedStream extends tts.ChunkedStream {
 
     if (pushed === 0) {
       logger.error({ requestId, responseSampleRate, bytes }, '[SpekoTTS] synthesize:empty-frames');
-      // Empty audio is a transient provider glitch — retryable so the framework
+      // Empty audio is a transient provider glitch - retryable so the framework
       // re-requests (and the router can fail over) instead of closing the call.
       // Also reachable when a very short utterance is entirely swallowed by the
       // resampler's warm-up; from the caller's seat that is the same outage.
@@ -534,13 +535,13 @@ function concatChunks(chunks: readonly Uint8Array[]): Uint8Array {
  * Decode a `SynthesizeResult` into raw PCM + sample rate + channel count.
  * Branches on `contentType`:
  *
- * - `audio/pcm;rate=NNNN` → raw payload, rate parsed from MIME parameters.
+ * - `audio/pcm;rate=NNNN` -> raw payload, rate parsed from MIME parameters.
  *   Cartesia's contract is mono, so channels is pinned to {@link NUM_CHANNELS}.
- * - `audio/wav` / `audio/x-wav` → WAV header stripped via `parseWav`. The
- *   embedded channel count is validated — v1 only handles mono, and a stereo
+ * - `audio/wav` / `audio/x-wav` -> WAV header stripped via `parseWav`. The
+ *   embedded channel count is validated - v1 only handles mono, and a stereo
  *   response would otherwise be fed to a mono `AudioByteStream` and played at
  *   half speed with L/R mixed.
- * - `audio/mpeg` or anything else → throws, documented v1 limitation.
+ * - `audio/mpeg` or anything else -> throws, documented v1 limitation.
  *
  * The returned `sampleRate` is whatever the response declares; the caller is
  * responsible for normalizing it to the rate the TTS advertises.

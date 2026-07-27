@@ -3,6 +3,7 @@ import type {
   ChatTool,
   ChatToolChoice,
   CompleteParams,
+  CompleteResult,
   PipelineConstraints,
   Speko,
   ChatMessage as SpekoChatMessage,
@@ -13,8 +14,9 @@ import { type Intent, validateIntent } from './intent.js';
 import { mergeTools, RegisteredToolsLoader } from './registered-tools.js';
 
 // Defined in errors.ts (so the audio/TTS paths can raise coded faults without
-// pulling in this module) and re-exported here to keep the import path that
-// callers and `index.ts` already use.
+// pulling in this module). Re-exported here only so the in-repo `./llm.js`
+// import path from before that move keeps working; the published surface is
+// `index.ts`, which exports it from `./errors.js`.
 export { SpekoAdapterError };
 
 export interface SpekoLLMGenerationInfo {
@@ -55,7 +57,7 @@ export interface SpekoLLMOptions {
   apiKey?: string;
   /**
    * Called once if the registered-tools fetch fails. Voice session keeps
-   * running with runtime-only tools — this is a soft degradation.
+   * running with runtime-only tools - this is a soft degradation.
    */
   onRegisteredToolsError?: (err: Error) => void;
   /**
@@ -115,8 +117,6 @@ export class SpekoLLM extends llm.LLM {
         }),
       });
       void this.#registeredLoader.load();
-    } else {
-      this.#registeredLoader = undefined;
     }
   }
 
@@ -240,7 +240,7 @@ class SpekoLLMStream extends llm.LLMStream {
           log().info('[SpekoLLM] complete:aborted (barge-in)');
         } else {
           // Aborted, but a NON-abort fault surfaced during teardown. Don't
-          // rethrow (the turn is already cancelled) but don't hide it either —
+          // rethrow (the turn is already cancelled) but don't hide it either -
           // a genuine fault during barge-in teardown must stay visible (#20).
           log().warn(
             { error: err instanceof Error ? err.message : String(err) },
@@ -278,7 +278,7 @@ class SpekoLLMStream extends llm.LLMStream {
     // Diagnostic logging mirrors SpekoTTS: the LiveKit framework consumes
     // an LLMStream silently if `run()` returns without ever calling
     // `queue.put()`, so without these logs the symptom is a session that
-    // emits "Creating speech handle" and then nothing — no error, no audio.
+    // emits "Creating speech handle" and then nothing - no error, no audio.
     // Grep the worker container for `[SpekoLLM]` to see the per-turn timeline.
     const logger = log();
     const requestId = crypto.randomUUID();
@@ -342,16 +342,9 @@ class SpekoLLMStream extends llm.LLMStream {
       }),
     };
 
-    let done:
-      | {
-          text: string;
-          provider: string;
-          model: string;
-          usage: { promptTokens: number; completionTokens: number };
-          failoverCount: number;
-          toolCalls?: Array<{ id: string; name: string; args: string }>;
-        }
-      | undefined;
+    // `CompleteStreamEvent`'s terminal variant is `CompleteResult & { type: 'done' }`,
+    // so name the SDK type rather than restating its fields here.
+    let done: CompleteResult | undefined;
     let streamedTextLength = 0;
     try {
       for await (const event of this.#speko.completeStream(
@@ -404,13 +397,18 @@ class SpekoLLMStream extends llm.LLMStream {
           )
         : undefined;
 
+    // `text` is typed non-optional but the gateway can omit it on a tool-only
+    // turn, so read the length once, defensively, and derive everything from it.
+    const textLength = done.text?.length ?? 0;
+    const hasText = textLength > 0;
+
     logger.info(
       {
         requestId,
         elapsedMs: Date.now() - t0,
         provider: done.provider,
         model: done.model,
-        textLength: done.text?.length ?? 0,
+        textLength,
         streamedTextLength,
         toolCallCount: toolCalls?.length ?? 0,
         failoverCount: done.failoverCount,
@@ -425,7 +423,6 @@ class SpekoLLMStream extends llm.LLMStream {
     // a content-less assistant delta, never invokes TTS, and the session
     // appears frozen with no error. Throwing here surfaces the failure to
     // the AgentSession's Error handler so it's visible in worker logs.
-    const hasText = typeof done.text === 'string' && done.text.length > 0;
     if (!hasText && toolCalls === undefined) {
       logger.error(
         {
@@ -468,7 +465,7 @@ class SpekoLLMStream extends llm.LLMStream {
     logger.info(
       {
         requestId,
-        contentLength: hasText ? done.text.length : 0,
+        contentLength: textLength,
         toolCallCount: toolCalls?.length ?? 0,
       },
       '[SpekoLLM] queue:put',
@@ -484,9 +481,9 @@ class SpekoLLMStream extends llm.LLMStream {
  */
 function toolCtxToSpekoTools(toolCtx: llm.ToolContextLike | undefined): ChatTool[] | undefined {
   if (!toolCtx) return undefined;
-  // `ToolContext` is a class as of @livekit/agents 1.5 — Object.entries on the
+  // `ToolContext` is a class as of @livekit/agents 1.5 - Object.entries on the
   // instance would iterate its private fields and silently drop every tool, so
-  // normalize first and read the name→tool map via the functionTools getter.
+  // normalize first and read the name->tool map via the functionTools getter.
   const entries = Object.entries(llm.toToolContext(toolCtx).functionTools);
   if (entries.length === 0) return undefined;
 
@@ -514,7 +511,7 @@ export function chatContextToSpeko(ctx: llm.ChatContext): SpekoChatMessage[] {
 
   for (const item of ctx.items) {
     if (item instanceof llm.ChatMessage) {
-      const text = extractText(item);
+      const text = item.textContent;
       if (!text) continue;
 
       const role =
@@ -549,9 +546,4 @@ export function chatContextToSpeko(ctx: llm.ChatContext): SpekoChatMessage[] {
   }
 
   return messages;
-}
-
-function extractText(message: llm.ChatMessage): string {
-  const text = message.textContent;
-  return typeof text === 'string' ? text : '';
 }

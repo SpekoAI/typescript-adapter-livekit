@@ -5,14 +5,14 @@ export interface RegisteredToolsLoaderOptions {
   /**
    * Initialised Speko client. The loader reads tools via
    * `speko.agents.tools.listChatTools(agentId)`, so auth and base URL come
-   * straight from the client — no separate `apiKey`/`baseUrl` needed.
+   * straight from the client - no separate `apiKey`/`baseUrl` needed.
    */
   readonly speko: Speko;
-  /** Agent identifier the worker is serving — must be a real agent id. */
+  /** Agent identifier the worker is serving - must be a real agent id. */
   readonly agentId: string;
   /**
    * Called once when the load fails (network error or non-2xx). The voice
-   * call still proceeds with whatever runtime tools LiveKit provided —
+   * call still proceeds with whatever runtime tools LiveKit provided -
    * the registered-tools failure is a non-fatal soft degradation, not a
    * crash. Hosts wire this to their structured logger.
    */
@@ -57,7 +57,7 @@ export class RegisteredToolsLoader {
   async #fetch(): Promise<ChatTool[] | undefined> {
     const { speko, agentId } = this.#options;
 
-    // Hard timeout — without this, a wedged API or unreachable host
+    // Hard timeout - without this, a wedged API or unreachable host
     // blocks the LLM stream's first turn forever, and the symptom is
     // a session that hangs at "Creating speech handle" with no further
     // logs (the loader is awaited inside SpekoLLMStream.run before any
@@ -68,7 +68,7 @@ export class RegisteredToolsLoader {
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
     try {
-      // `available: true` → the server omits integration tools whose backing
+      // `available: true` -> the server omits integration tools whose backing
       // installation is disconnected/missing, so the model is never offered a
       // tool that would fail mid-call.
       return await speko.agents.tools.listChatTools(agentId, controller.signal, {
@@ -98,8 +98,8 @@ export type ToolMap = llm.ToolContext['functionTools'];
 export interface InlineToolContextOptions {
   /**
    * Names already claimed by purpose-built runtime tools (end_call, warm
-   * transfer, send_dtmf, …). A registered tool colliding with one of these is
-   * skipped — the purpose-built tool carries session behavior the generic
+   * transfer, send_dtmf, ...). A registered tool colliding with one of these is
+   * skipped - the purpose-built tool carries session behavior the generic
    * capture executor must not shadow.
    */
   readonly reservedNames?: ReadonlySet<string>;
@@ -119,11 +119,11 @@ export interface InlineToolContextOptions {
  * dashboard-registered `inline` tool was definition-only on voice calls. The
  * gateway returns inline tool calls verbatim BY DESIGN (API callers execute
  * their own inline tools client-side), and the LiveKit framework executes only
- * tools present in its ToolContext — which registered tools never entered. So
+ * tools present in its ToolContext - which registered tools never entered. So
  * the model would call `place_order`, and nothing anywhere could execute it:
  * the call died silently and the conversation stalled or the model was never
  * offered the tool's result. `webhook` / `builtin` / `integration` tools are
- * deliberately NOT injected here — the gateway executes those server-side and
+ * deliberately NOT injected here - the gateway executes those server-side and
  * folds the result into the next turn.
  *
  * The executor is capture-acknowledge: it records the call (via `onExecuted`,
@@ -170,7 +170,7 @@ export interface MergeToolsOptions {
  * Merge registered tools with LiveKit-runtime tools.
  *
  * Conflict policy: a tool registered in `agent_tool` is the customer's
- * authoritative declaration — they typed it into the dashboard and
+ * authoritative declaration - they typed it into the dashboard and
  * expect it to be the one the model sees. So registered wins on name
  * collision, and we (optionally) emit one debug call for visibility.
  *

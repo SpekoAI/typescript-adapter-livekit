@@ -22,7 +22,7 @@ export interface SpekoSTTOptions {
    * Optional Speko voice session id. Forwarded with every transcription for
    * usage attribution, and used to tag the streaming-STT log lines so a given
    * call's reconnect / give-up activity can be bucketed in aggregated logs
-   * (SPE-121 — before this a `[speko.SpeechStream]` line carried no call
+   * (SPE-121 - before this a `[speko.SpeechStream]` line carried no call
    * identity, so a 1011 storm couldn't be attributed to a session).
    */
   sessionId?: string;
@@ -31,6 +31,11 @@ export interface SpekoSTTOptions {
   /**
    * Optional domain keywords forwarded to the underlying provider for
    * vocabulary biasing. Casing is preserved for proper nouns.
+   *
+   * The gateway caps the list at 200 terms and rejects a longer one: the batch
+   * path returns `400 Invalid stt options`, and the streaming path closes the
+   * socket with 4400 (surfaced as a permanent `stt_error`). The adapter does
+   * not truncate for you.
    */
   keywords?: readonly string[];
   /**
@@ -43,12 +48,12 @@ export interface SpekoSTTOptions {
    * `GET /v1/transcribe/stream` WebSocket endpoint. When `true`, this STT
    * declares `{ streaming: true }` and `stream()` opens a long-lived WS that
    * streams raw PCM and emits interim + final transcripts as the provider
-   * produces them — no VAD-bounded buffering. When `false` (default for direct
+   * produces them - no VAD-bounded buffering. When `false` (default for direct
    * construction), the adapter uploads one VAD-bounded WAV per turn via
    * `_recognize()` and must be wrapped with `stt.StreamAdapter`.
    *
    * `streaming` requires {@link baseUrl} and {@link apiKey} so the stream can
-   * open its own WebSocket — the `Speko` SDK client does not expose them.
+   * open its own WebSocket - the `Speko` SDK client does not expose them.
    */
   streaming?: boolean;
   /**
@@ -74,7 +79,7 @@ export interface SpekoSTTOptions {
    * adaptive (ML) interruption detector, but Speko routing picks the provider
    * PER CALL. If we declared `'word'` unconditionally and a call routed to a
    * non-word provider (cartesia, kotib, google), we'd promise word timings we
-   * never deliver — LiveKit's detector would then see empty `words` arrays.
+   * never deliver - LiveKit's detector would then see empty `words` arrays.
    * `createSpekoComponents` only flips this true when the constraints pin a
    * single known word-emitter; ad-hoc construction leaves it false (safe).
    */
@@ -208,7 +213,7 @@ export class SpekoSTT extends stt.STT {
       // An abort (barge-in) propagates unchanged for the framework to handle.
       // Any other fault becomes a classified APIError so the batch STT retry
       // loop engages (a transient transcribe blip retries instead of being
-      // reported as recoverable:false — which for STT closes the call instantly,
+      // reported as recoverable:false - which for STT closes the call instantly,
       // since the AgentSession gives STT no error budget).
       if (isAbortError(err) || abortSignal?.aborted) throw err;
       throw toFrameworkApiError(err);
@@ -265,7 +270,7 @@ export class SpekoSTT extends stt.STT {
    * flushes a native streaming STT itself (it only flushes the batch
    * StreamAdapter), so without this nudge a provider that endpoints
    * server-side (navai, smallest/pulse) finalizes on its OWN silence timer,
-   * ~1-3s after the caller stopped — the dominant EOU latency term. No-op per
+   * ~1-3s after the caller stopped - the dominant EOU latency term. No-op per
    * stream once it is closed or its input has ended; retired streams are
    * pruned here.
    */
@@ -279,7 +284,7 @@ export class SpekoSTT extends stt.STT {
         stream.flush();
       } catch {
         // flush() throws once the stream/input closed between the guard and
-        // the call — the stream is done; drop it and move on.
+        // the call - the stream is done; drop it and move on.
         this.#activeStreams.delete(stream);
       }
     }
@@ -301,7 +306,7 @@ interface SpekoSpeechStreamOptions {
    * Mirror of the parent STT's word-alignment capability. On aligned streams
    * the config frame requests interim results (the adaptive interruption
    * detector needs word-timed transcripts DURING overlap, not ~0.5-1s later at
-   * the final), and words-less frames get guarded timings — LiveKit's
+   * the final), and words-less frames get guarded timings - LiveKit's
    * `flushHeldTranscripts` treats a `startTime === endTime === 0` alternative
    * as "no timestamps" and discards the ENTIRE held buffer of user speech.
    */
@@ -331,7 +336,7 @@ interface ServerTranscriptWord {
   confidence?: number;
 }
 
-/** Server→client frame from `GET /v1/transcribe/stream`. */
+/** Server->client frame from `GET /v1/transcribe/stream`. */
 interface ServerTranscriptFrame {
   type: 'transcript';
   text: string;
@@ -359,7 +364,7 @@ const WS_OPEN = 1;
  * gateway pod cycling, the now-fixed server-side 4401 auth race) must NEVER
  * permanently deafen a live call, so we reconnect with jittered exponential
  * backoff and a budget that RESETS after any connection that stayed healthy for
- * a while — a long call with occasional drops can't exhaust a fixed count. A
+ * a while - a long call with occasional drops can't exhaust a fixed count. A
  * truly dead endpoint still gives up after `maxConsecutive` rapid failures (so
  * we don't spin forever), and giving up surfaces a recoverable:false error to
  * the session instead of going silently quiet.
@@ -379,7 +384,7 @@ export interface ReconnectPolicy {
    * Absolute cap on TOTAL reconnects across the whole call, independent of the
    * healthy-stretch reset. The consecutive-failure budget resets after any
    * healthy+audio connection, so a socket that recycles every ~11s would
-   * otherwise reconnect FOREVER — deaf for a window each cycle — and never give
+   * otherwise reconnect FOREVER - deaf for a window each cycle - and never give
    * up. This bounds the lifetime churn: a chronic flap escalates (gives up)
    * instead of silently degrading the call forever.
    */
@@ -396,11 +401,11 @@ export const DEFAULT_RECONNECT_POLICY: ReconnectPolicy = {
 };
 
 /**
- * WebSocket close codes that signal a PERMANENT failure — reconnecting can
+ * WebSocket close codes that signal a PERMANENT failure - reconnecting can
  * never recover, so burning the reconnect budget on them just adds ~10-15s of
  * caller-facing dead air before the inevitable give-up. 4401 = unauthorized
  * (stale/revoked key), 4400 = invalid config, 1008 = policy violation. Transient
- * codes (1006 abnormal, 1011 server error) are NOT here — those reconnect.
+ * codes (1006 abnormal, 1011 server error) are NOT here - those reconnect.
  */
 const PERMANENT_WS_CLOSE_CODES = new Set([4401, 4400, 1008]);
 
@@ -429,7 +434,7 @@ type SttErrorEvent = Parameters<stt.STTCallbacks['error']>[0];
  * concurrent sessions don't reconnect in lockstep and hammer a recovering
  * gateway. Waiting this out with a REAL timer (see {@link SpekoSpeechStream})
  * also guarantees the reconnect loop yields to the macrotask queue every
- * iteration — it can never starve the worker event loop with a tight microtask
+ * iteration - it can never starve the worker event loop with a tight microtask
  * spin. `rng` is injectable for deterministic tests.
  */
 export function reconnectBackoffMs(
@@ -444,7 +449,7 @@ export function reconnectBackoffMs(
 
 /**
  * Build the `stt_error` event the AgentSession listens for on the STT instance
- * (`stt.on('error', …)`). Mirrors the framework's private `emitError` shape: we
+ * (`stt.on('error', ...)`). Mirrors the framework's private `emitError` shape: we
  * cannot trigger that by throwing from `run()` because `run()` is fire-and-forget
  * via `startSoon` (a throw becomes an unhandled rejection), so emitting this
  * directly is how a permanently-dead stream is surfaced to the session instead
@@ -476,10 +481,10 @@ function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
 
 /**
  * Opt-in flush-endpoint path (read per-call so tests / runtime env changes take
- * effect without a re-import). When on, an utterance-boundary FLUSH_SENTINEL —
+ * effect without a re-import). When on, an utterance-boundary FLUSH_SENTINEL -
  * pushed by the worker at VAD end-of-speech (the 1.5.0 voice pipeline never
- * flushes a native streaming STT itself) — is forwarded to the proxy as a
- * `{type:'flush'}` frame; default off → the sentinel is swallowed exactly as
+ * flushes a native streaming STT itself) - is forwarded to the proxy as a
+ * `{type:'flush'}` frame; default off -> the sentinel is swallowed exactly as
  * before. See SPEKO_STT_FLUSH_ENDPOINT.
  */
 export function sttFlushEndpointEnabled(): boolean {
@@ -495,7 +500,7 @@ export function sttFlushEndpointEnabled(): boolean {
  *
  * Resilience contract (per spec): a WS failure must NOT crash the session. On
  * any socket error or unexpected close we log loudly, attempt a bounded
- * reconnect, and if reconnects are exhausted we return cleanly from `run()` —
+ * reconnect, and if reconnects are exhausted we return cleanly from `run()` -
  * which closes the output queue (an implicit "end"), so the AgentSession keeps
  * running (silently deaf) rather than throwing.
  */
@@ -506,11 +511,10 @@ export class SpekoSpeechStream extends stt.SpeechStream {
   readonly #language: LanguageCode;
   readonly #policy: ReconnectPolicy;
   readonly #createWebSocket: WebSocketFactory;
-  readonly #sessionId: string | undefined;
   #speaking = false;
   readonly #now: () => number;
   /**
-   * Session epoch (ms): when this stream was created — the closest observable
+   * Session epoch (ms): when this stream was created - the closest observable
    * to LiveKit's session-scoped input clock (`_inputStartedAt`). All aligned
    * timestamps are expressed as seconds since this epoch.
    */
@@ -519,7 +523,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
    * Session-relative seconds at the CURRENT connection's audio start. Provider
    * word timings restart at ~0 on every gateway connection, but the reconnect
    * loop is invisible to LiveKit, whose `audio_recognition` compares timings
-   * against the session-scoped clock — un-rebased post-reconnect timings map
+   * against the session-scoped clock - un-rebased post-reconnect timings map
    * into the deep past of its echo ignore-window, so every held barge-in
    * transcript would be discarded for the rest of the call. Rebased in
    * `ws.onopen` for every connection; applied to emitted timings only on
@@ -554,7 +558,6 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     this.#language = asLanguageCode(opts.intent.language);
     this.#policy = { ...DEFAULT_RECONNECT_POLICY, ...(opts.reconnect ?? {}) };
     this.#createWebSocket = opts.createWebSocket ?? defaultCreateWebSocket;
-    this.#sessionId = opts.sessionId;
     this.#now = opts.now ?? Date.now;
     this.#streamEpochMs = this.#now();
   }
@@ -572,8 +575,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     // Fallback summary for a wedged connection: run()'s finally logs the
     // complete counters first when the loop unwinds promptly (#summaryLogged
     // dedupes); this only fires if it never does.
-    const fallback = setTimeout(() => this.#logSummary(), 250);
-    fallback.unref?.();
+    unrefTimer(setTimeout(() => this.#logSummary(), 250));
   }
 
   async #runUntilDone(): Promise<void> {
@@ -584,7 +586,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     const inputIterator = this.input[Symbol.asyncIterator]();
     let inputDone = false;
     let consecutiveFailures = 0;
-    // Total reconnects across the whole call — the lifetime cap (#13) so a
+    // Total reconnects across the whole call - the lifetime cap (#13) so a
     // connection that flaps every ~healthyMs can't reset the consecutive budget
     // forever and churn for the entire call.
     let totalReconnects = 0;
@@ -606,11 +608,11 @@ export class SpekoSpeechStream extends stt.SpeechStream {
         const error = err instanceof Error ? err : new Error(String(err));
         if (progress.audioPumped) everPumpedAudio = true;
         this.#emitError(error);
-        if (this.closed || inputDone) break;
+        if (this.closed) break;
 
         // A permanent close (auth/config/policy) will never recover. Giving it
         // the full reconnect budget just burns ~10-15s of caller-facing dead air
-        // before the inevitable give-up — fail fast with a clear diagnostic (#11).
+        // before the inevitable give-up - fail fast with a clear diagnostic (#11).
         if (isPermanentStreamError(error)) {
           this.#giveUp(error, everPumpedAudio, 'permanent');
           break;
@@ -628,8 +630,8 @@ export class SpekoSpeechStream extends stt.SpeechStream {
 
         // Reset the budget ONLY when the dropped connection both stayed up a
         // healthy stretch AND actually carried audio. A connection that opened
-        // but pumped ZERO audio — a leaked/duplicate stream, or a call whose
-        // caller track never subscribed — is NOT healthy: healthyMs (~10s)
+        // but pumped ZERO audio - a leaked/duplicate stream, or a call whose
+        // caller track never subscribed - is NOT healthy: healthyMs (~10s)
         // equals the upstream's no-audio idle timeout, so before this guard such
         // a stream 1011'd at ~10s, reset the budget purely by surviving, and
         // reconnected FOREVER (SPE-121: heavy 1011 spam, even on idle workers).
@@ -655,10 +657,10 @@ export class SpekoSpeechStream extends stt.SpeechStream {
 
     // If we stopped reconnecting while audio is still flowing (we gave up), keep
     // draining the framework's input queue in the background so it can't grow
-    // unbounded for the rest of the call — the base class's `pumpInput` keeps
+    // unbounded for the rest of the call - the base class's `pumpInput` keeps
     // feeding it regardless of whether `run()` is still consuming. A dead STT
     // stream must never wedge or balloon the job. Returning from `run()` also
-    // closes the output queue (an implicit end-of-stream); we never re-throw — a
+    // closes the output queue (an implicit end-of-stream); we never re-throw - a
     // dead WS must not take down the call.
     if (!inputDone && !this.closed) {
       void this.#drainAfterGiveUp(inputIterator);
@@ -714,7 +716,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       };
 
       // Watchdog: a socket that never opens (half-open TCP, a black-holed proxy)
-      // would never fire open/close/error, so this promise would hang forever —
+      // would never fire open/close/error, so this promise would hang forever -
       // silently deafening the call with no reconnect. Time it out into a
       // reconnectable failure so the run loop can back off and retry.
       openTimer = setTimeout(() => {
@@ -750,7 +752,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
               // can finalize on this semantic turn signal instead of waiting out
               // its server-side silence timer. The server ignores it unless the
               // pinned provider is flush-capable, so this is safe for every
-              // other provider; off by default → unchanged.
+              // other provider; off by default -> unchanged.
               if (sttFlushEndpointEnabled() && ws.readyState === WS_OPEN) {
                 ws.send(JSON.stringify({ type: 'flush' }));
               }
@@ -764,7 +766,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
             }
             ws.send(pcmBytes(frame));
             this.#audioMsPumped += audioFrameDurationMs(frame);
-            // Mark that this connection carried real audio — the run loop uses
+            // Mark that this connection carried real audio - the run loop uses
             // this to decide whether a drop counts as a "healthy" reconnect or
             // whether a no-audio stream should give up (SPE-121).
             progress.audioPumped = true;
@@ -828,7 +830,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
             settle(true);
           } else {
             // Server ended the stream mid-call while we still have audio to send
-            // — the upstream provider dropped us. Treat it as a reconnectable
+            // - the upstream provider dropped us. Treat it as a reconnectable
             // failure rather than ignoring it (which parked run() on a half-dead
             // socket, deaf until a later 1011 finally fired) (#14).
             fail(new Error('Speko streaming STT server ended the stream mid-call'));
@@ -848,7 +850,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       };
 
       ws.onclose = (evt: CloseEvent) => {
-        // A permanent close (auth/config/policy) can never recover — surface it
+        // A permanent close (auth/config/policy) can never recover - surface it
         // as a non-reconnectable failure so the run loop gives up immediately
         // instead of burning the reconnect budget on a guaranteed-dead endpoint
         // (#11). Checked first so it applies even on a close-before-open.
@@ -861,16 +863,16 @@ export class SpekoSpeechStream extends stt.SpeechStream {
           return;
         }
         if (!pumping) {
-          // Closed before we ever opened/pumped — reconnectable.
+          // Closed before we ever opened/pumped - reconnectable.
           fail(new Error(`Speko streaming STT WebSocket closed before open (code ${evt.code})`));
           return;
         }
-        // Clean close after we sent everything, or input is done → finished.
+        // Clean close after we sent everything, or input is done -> finished.
         if (inputFinished || evt.code === 1000) {
           settle(true);
           return;
         }
-        // Dropped mid-session with input still flowing → reconnect.
+        // Dropped mid-session with input still flowing -> reconnect.
         fail(new Error(`Speko streaming STT WebSocket closed unexpectedly (code ${evt.code})`));
       };
     });
@@ -915,12 +917,12 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     // LiveKit's adaptive interruption detector aligns these against the audio
     // clock; SpeechData.startTime/endTime span the whole utterance. On aligned
     // streams every timing is rebased onto the SESSION clock (provider timings
-    // are connection-relative and restart on reconnect — see #connEpochOffsetS);
+    // are connection-relative and restart on reconnect - see #connEpochOffsetS);
     // non-aligned streams keep the raw provider timings, byte-for-byte.
     const aligned = this.#opts.alignedTranscript === true;
     const offsetS = aligned ? this.#connEpochOffsetS : 0;
     // A word without finite timings would propagate NaN into every framework
-    // comparison — drop it (the gateway wire contract never emits one).
+    // comparison - drop it (the gateway wire contract never emits one).
     const timedWords = frame.words?.filter(
       (w) => Number.isFinite(w.start) && Number.isFinite(w.end),
     );
@@ -950,10 +952,10 @@ export class SpekoSpeechStream extends stt.SpeechStream {
       // Words-less frame on a word-aligned stream: Deepgram emits empty finals
       // during silence; ElevenLabs realtime interims carry text but no words.
       // LiveKit's flushHeldTranscripts treats a startTime === endTime === 0
-      // alternative as "no timestamps" and drops the ENTIRE held buffer —
+      // alternative as "no timestamps" and drops the ENTIRE held buffer -
       // every word the user spoke over the agent. An empty frame outside
       // speech carries no information, so skip it; any other words-less frame
-      // is stamped at the session clock "now" (≈ the end of the audio it
+      // is stamped at the session clock "now" (~ the end of the audio it
       // transcribes, one transcription delay late) so it stays orderable and
       // can never look like pre-playback echo.
       if (!text && !this.#speaking) {
@@ -1011,7 +1013,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
   /**
    * Reconnects are exhausted with audio still flowing. Log loudly AND surface a
    * recoverable:false error to the AgentSession so the call doesn't just go
-   * silently deaf — the session's error handler sees a real STT error event.
+   * silently deaf - the session's error handler sees a real STT error event.
    */
   #giveUp(
     error: Error,
@@ -1019,7 +1021,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     reason: 'exhausted' | 'permanent' | 'flapping' = 'exhausted',
   ): void {
     this.#log(
-      `[phase=fatal] giving up (reason=${reason}, audioReceived=${audioReceived}) — the live ` +
+      `[phase=fatal] giving up (reason=${reason}, audioReceived=${audioReceived}) - the live ` +
         `session will stop receiving transcripts (last error: ${error.message})`,
     );
     this.#surfaceSessionError(
@@ -1030,7 +1032,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
   /**
    * Emit the framework's `stt_error` event on the STT instance so the
    * AgentSession's error handler observes it. We can't throw from run() (it's
-   * fire-and-forget via startSoon → unhandled rejection) and the base class's
+   * fire-and-forget via startSoon -> unhandled rejection) and the base class's
    * emitError is private, so this is the safe surfacing path. Best-effort:
    * surfacing must never break the run loop.
    */
@@ -1038,11 +1040,11 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     try {
       this.#sttImpl.emit('error', buildSttErrorEvent(this.label, error));
     } catch {
-      // ignore — observability must not take down the call
+      // ignore - observability must not take down the call
     }
   }
 
-  /** A real timer-backed sleep — guarantees the reconnect loop yields the event loop. */
+  /** A real timer-backed sleep - guarantees the reconnect loop yields the event loop. */
   #sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
       unrefTimer(setTimeout(resolve, ms));
@@ -1063,16 +1065,17 @@ export class SpekoSpeechStream extends stt.SpeechStream {
         if (done) break;
       }
     } catch {
-      // Stream torn down — nothing to do.
+      // Stream torn down - nothing to do.
     }
   }
 
   #log(message: string): void {
-    // Loud, per the spec — a streaming-STT failure should be obvious in logs.
+    // Loud, per the spec - a streaming-STT failure should be obvious in logs.
     // Tag with the session id (when known) so a 1011 storm in aggregated logs
     // can be attributed to a specific call rather than being un-bucketable
     // (SPE-121).
-    const tag = this.#sessionId ? `speko.SpeechStream ${this.#sessionId}` : 'speko.SpeechStream';
+    const sessionId = this.#opts.sessionId;
+    const tag = sessionId ? `speko.SpeechStream ${sessionId}` : 'speko.SpeechStream';
     console.error(`[${tag}] ${message}`);
   }
 
@@ -1082,7 +1085,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     const summary = {
       marker: 'stt_stream_summary',
       label: this.label,
-      sessionId: this.#sessionId ?? null,
+      sessionId: this.#opts.sessionId ?? null,
       framesReceived: this.#framesReceived,
       finalsReceived: this.#finalsReceived,
       emptyFinalsDropped: this.#emptyFinalsDropped,
