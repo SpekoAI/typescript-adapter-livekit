@@ -68,7 +68,7 @@ describe('@spekoai/sdk peer range', () => {
   });
 
   it('publishes the version this changelog entry describes', () => {
-    expect(manifest['version']).toBe('0.1.4');
+    expect(manifest['version']).toBe('0.1.5');
   });
 });
 

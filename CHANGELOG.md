@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5
+
+### Fixes
+
+- Add the adapter User-Agent to native streaming STT WebSocket factory headers. Authentication and session headers stay unchanged.
+- Check emitted factory arguments against final package metadata before publication. The batch path stays unchanged and retains the SDK marker.
+
 ## 0.1.4
 
 Documentation and packaging fixes. No runtime behavior changes.

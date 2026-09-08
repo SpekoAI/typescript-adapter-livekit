@@ -13,6 +13,8 @@ import { framesToWav } from './audio.js';
 import { isAbortError, toFrameworkApiError } from './errors.js';
 import { type Intent, validateIntent } from './intent.js';
 
+const USER_AGENT = '@spekoai/adapter-livekit/0.1.5';
+
 export interface SpekoSTTOptions {
   /** Initialised Speko client from `@spekoai/sdk`. */
   speko: Speko;
@@ -899,6 +901,7 @@ export class SpekoSpeechStream extends stt.SpeechStream {
     const trimmedSessionId = this.#opts.sessionId?.trim();
     return {
       Authorization: `Bearer ${this.#opts.apiKey}`,
+      'User-Agent': USER_AGENT,
       ...(trimmedSessionId ? { 'x-session-id': trimmedSessionId } : {}),
     };
   }
