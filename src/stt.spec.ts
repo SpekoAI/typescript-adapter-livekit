@@ -608,8 +608,8 @@ describe('SpekoSpeechStream flush-endpoint (SPEKO_STT_FLUSH_ENDPOINT)', () => {
   function streamingStt() {
     const { speko } = makeFakeSpeko({
       text: '',
-      provider: 'navai',
-      model: 'navai-uz',
+      provider: 'smallest',
+      model: 'pulse',
       confidence: 1,
       failoverCount: 0,
       scoresRunId: null,
