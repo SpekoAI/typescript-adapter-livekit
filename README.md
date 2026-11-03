@@ -143,7 +143,7 @@ const wrappedTTS = new tts.StreamAdapter(
   a routing intent that prefers Cartesia, or ask Speko to normalise output
   to PCM server-side before you upgrade.
 - **TTS output sample rate.** Whatever rate the routed provider produces (24 kHz
-  for most, 48 kHz for Hume and Gradium, 16 kHz for Amazon Polly) is resampled
+  for most, 48 kHz for Gradium, 16 kHz for Amazon Polly) is resampled
   to the `sampleRate` the TTS advertises, so the declared rate is always what
   LiveKit receives. Matching rates cost nothing.
 - **STT input format.** Mono PCM16. The adapter encodes whatever sample rate
